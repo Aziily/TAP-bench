@@ -1,0 +1,8 @@
+.history/
+.vscode/
+
+__pycache__/
+outputs/
+logs/
+
+.DS_Store

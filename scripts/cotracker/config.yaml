@@ -1,0 +1,20 @@
+exp_dir: ./eval_outputs
+mode: depth_tapvid_davis_first
+data_root: ./datasets/tap/tapvid_davis
+checkpoint: ./checkpoints/scaled_offline.pth
+proportions:
+- 0.0
+- 0.0
+- 0.0
+grid_size: 5
+local_grid_size: 8
+num_uniformly_sampled_pts: 0
+sift_size: 0
+single_point: false
+offline_model: true
+window_len: 60
+n_iters: 6
+seed: 0
+gpu_idx: 0
+local_extent: 50
+v2: false

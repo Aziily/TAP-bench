@@ -1,0 +1,12 @@
+[submodule "repos/co-tracker"]
+	path = repos/co-tracker
+	url = https://github.com/facebookresearch/co-tracker.git
+[submodule "repos/locotrack"]
+	path = repos/locotrack
+	url = https://github.com/cvlab-kaist/locotrack.git
+[submodule "repos/pips2"]
+	path = repos/pips2
+	url = https://github.com/aharley/pips2.git
+[submodule "repos/TAPTR"]
+	path = repos/TAPTR
+	url = https://github.com/IDEA-Research/TAPTR.git

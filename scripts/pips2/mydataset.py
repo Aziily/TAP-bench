@@ -1,0 +1,336 @@
+from numpy import random
+from numpy.core.numeric import full
+import torch
+import numpy as np
+import pickle
+import cv2
+import glob
+import os
+import io
+from PIL import Image
+
+from typing import Mapping
+
+def sample_queries_first(
+    target_occluded: np.ndarray,
+    target_points: np.ndarray,
+    frames: np.ndarray,
+) -> Mapping[str, np.ndarray]:
+    """Package a set of frames and tracks for use in TAPNet evaluations.
+    Given a set of frames and tracks with no query points, use the first
+    visible point in each track as the query.
+    Args:
+      target_occluded: Boolean occlusion flag, of shape [n_tracks, n_frames],
+        where True indicates occluded.
+      target_points: Position, of shape [n_tracks, n_frames, 2], where each point
+        is [x,y] scaled between 0 and 1.
+      frames: Video tensor, of shape [n_frames, height, width, 3].  Scaled between
+        -1 and 1.
+    Returns:
+      A dict with the keys:
+        video: Video tensor of shape [1, n_frames, height, width, 3]
+        query_points: Query points of shape [1, n_queries, 3] where
+          each point is [t, y, x] scaled to the range [-1, 1]
+        target_points: Target points of shape [1, n_queries, n_frames, 2] where
+          each point is [x, y] scaled to the range [-1, 1]
+    """
+    valid = np.sum(~target_occluded, axis=1) > 0
+    target_points = target_points[valid, :]
+    target_occluded = target_occluded[valid, :]
+
+    query_points = []
+    for i in range(target_points.shape[0]):
+        index = np.where(target_occluded[i] == 0)[0][0]
+        x, y = target_points[i, index, 0], target_points[i, index, 1]
+        query_points.append(np.array([index, y, x]))  # [t, y, x]
+    query_points = np.stack(query_points, axis=0)
+
+    return {
+        "video": frames[np.newaxis, ...],
+        "query_points": query_points[np.newaxis, ...],
+        "target_points": target_points[np.newaxis, ...],
+        "occluded": target_occluded[np.newaxis, ...],
+    }
+
+
+def sample_queries_strided(
+    target_occluded: np.ndarray,
+    target_points: np.ndarray,
+    frames: np.ndarray,
+    query_stride: int = 5,
+) -> Mapping[str, np.ndarray]:
+    """Package a set of frames and tracks for use in TAPNet evaluations.
+
+    Given a set of frames and tracks with no query points, sample queries
+    strided every query_stride frames, ignoring points that are not visible
+    at the selected frames.
+
+    Args:
+      target_occluded: Boolean occlusion flag, of shape [n_tracks, n_frames],
+        where True indicates occluded.
+      target_points: Position, of shape [n_tracks, n_frames, 2], where each point
+        is [x,y] scaled between 0 and 1.
+      frames: Video tensor, of shape [n_frames, height, width, 3].  Scaled between
+        -1 and 1.
+      query_stride: When sampling query points, search for un-occluded points
+        every query_stride frames and convert each one into a query.
+
+    Returns:
+      A dict with the keys:
+        video: Video tensor of shape [1, n_frames, height, width, 3].  The video
+          has floats scaled to the range [-1, 1].
+        query_points: Query points of shape [1, n_queries, 3] where
+          each point is [t, y, x] scaled to the range [-1, 1].
+        target_points: Target points of shape [1, n_queries, n_frames, 2] where
+          each point is [x, y] scaled to the range [-1, 1].
+        trackgroup: Index of the original track that each query point was
+          sampled from.  This is useful for visualization.
+    """
+    tracks = []
+    occs = []
+    queries = []
+    trackgroups = []
+    total = 0
+    trackgroup = np.arange(target_occluded.shape[0])
+    for i in range(0, target_occluded.shape[1], query_stride):
+        mask = target_occluded[:, i] == 0
+        query = np.stack(
+            [
+                i * np.ones(target_occluded.shape[0:1]),
+                target_points[:, i, 1],
+                target_points[:, i, 0],
+            ],
+            axis=-1,
+        )
+        queries.append(query[mask])
+        tracks.append(target_points[mask])
+        occs.append(target_occluded[mask])
+        trackgroups.append(trackgroup[mask])
+        total += np.array(np.sum(target_occluded[:, i] == 0))
+
+    return {
+        "video": frames[np.newaxis, ...],
+        "query_points": np.concatenate(queries, axis=0)[np.newaxis, ...],
+        "target_points": np.concatenate(tracks, axis=0)[np.newaxis, ...],
+        "occluded": np.concatenate(occs, axis=0)[np.newaxis, ...],
+        "trackgroup": np.concatenate(trackgroups, axis=0)[np.newaxis, ...],
+    }
+
+class TapVidDavis(torch.utils.data.Dataset):
+    def __init__(self, dataset_location='../datasets/tapvid_davis'):
+
+        print('loading TAPVID-DAVIS dataset...')
+
+        input_path = '%s/tapvid_davis.pkl' % dataset_location
+        with open(input_path, 'rb') as f:
+            data = pickle.load(f)
+            if isinstance(data, dict):
+                data = list(data.values())
+        self.data = data
+        print('found %d videos in %s' % (len(self.data), dataset_location))
+        
+    def __getitem__(self, index):
+        dat = self.data[index]
+        rgbs = dat['video'] # list of H,W,C uint8 images
+        trajs = dat['points'] # N,S,2 array
+        valids = 1-dat['occluded'] # N,S array
+        # note the annotations are only valid when not occluded
+        
+        trajs = trajs.transpose(1,0,2) # S,N,2
+        valids = valids.transpose(1,0) # S,N
+
+        vis_ok = valids[0] > 0
+        trajs = trajs[:,vis_ok]
+        valids = valids[:,vis_ok]
+
+        # 1.0,1.0 should lie at the bottom-right corner pixel
+        H, W, C = rgbs[0].shape
+        trajs[:,:,0] *= W-1
+        trajs[:,:,1] *= H-1
+
+        rgbs = torch.from_numpy(np.stack(rgbs,0)).permute(0,3,1,2) # S,C,H,W
+        trajs = torch.from_numpy(trajs) # S,N,2
+        valids = torch.from_numpy(valids) # S,N
+
+        sample = {
+            'rgbs': rgbs,
+            'trajs': trajs,
+            'valids': valids,
+            'visibs': valids,
+        }
+        return sample
+
+    def __len__(self):
+        return len(self.data)
+
+def read_videos(folder_path, video_suffix="*.mp4", rgb=False):
+    depth_videos = {}
+    video_paths = glob.glob(os.path.join(folder_path, video_suffix))
+    
+    for video_path in video_paths:
+        video_name = os.path.basename(video_path).replace(video_suffix[1:], "")
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Ensure grayscale
+            frames.append(gray_frame[..., np.newaxis])  # Add channel dimension
+        
+        cap.release()
+        
+        if frames:
+            frames = np.array(frames)  # [F, H, W, 1]
+            if rgb and frames.shape[-1] == 1:
+                frames = np.concatenate([frames] * 3, axis=-1)
+            
+            depth_videos[video_name] = frames
+            
+    return depth_videos
+
+class TapVidDepthDavis(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        data_root,
+        depth_root,
+        proportions,
+        dataset_type="davis",
+        queried_first=True,
+        image_size=(512, 896),
+    ):
+        self.dataset_type = dataset_type
+        self.proportions = proportions
+        self.queried_first = queried_first
+        self.image_size = image_size
+        
+        if self.dataset_type == "kinetics":
+            all_paths = glob.glob(os.path.join(data_root, "*_of_0010.pkl"))
+            points_dataset = []
+            for pickle_path in all_paths:
+                with open(pickle_path, "rb") as f:
+                    data = pickle.load(f)
+                    points_dataset = points_dataset + data
+            self.points_dataset = points_dataset
+
+        elif self.dataset_type == "robotap":
+            all_paths = glob.glob(os.path.join(data_root, "robotap_split*.pkl"))
+            points_dataset = None
+            for pickle_path in all_paths:
+                with open(pickle_path, "rb") as f:
+                    data = pickle.load(f)
+                    if points_dataset is None:
+                        points_dataset = dict(data)
+                    else:
+                        points_dataset.update(data)
+            self.points_dataset = points_dataset
+            self.video_names = list(self.points_dataset.keys())
+            
+        else:
+            with open(data_root, "rb") as f:
+                self.points_dataset = pickle.load(f)
+        
+        self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+        self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
+            
+        if self.dataset_type == "davis":
+            self.video_names = list(self.points_dataset.keys())
+        elif self.dataset_type == "stacking":
+            self.video_names = [f"video_{i:04d}" for i in range(len(self.points_dataset))]
+            
+        print("found %d unique videos in %s" % (len(self.points_dataset), data_root))
+
+        
+    def __getitem__(self, index):
+        if self.dataset_type in ["davis", "stacking"]:
+            video_name = self.video_names[index]
+        else:
+            video_name = index
+            
+        if self.dataset_type == "davis":
+            video_index = video_name
+        else:
+            video_index = index
+            
+        frames = self.video_dataset[video_name]
+        depth_frames = self.depth_dataset[video_name]
+        
+        if isinstance(frames[0], bytes):
+            # TAP-Vid is stored and JPEG bytes rather than `np.ndarray`s.
+            def decode(frame):
+                byteio = io.BytesIO(frame)
+                img = Image.open(byteio)
+                return np.array(img)
+
+            frames = np.array([decode(frame) for frame in frames])
+        if isinstance(depth_frames[0], bytes):
+            # TAP-Vid is stored and JPEG bytes rather than `np.ndarray`s.
+            def decode(frame):
+                byteio = io.BytesIO(frame)
+                img = Image.open(byteio)
+                return np.array(img)
+
+            depth_frames = np.array([decode(frame) for frame in depth_frames])
+        
+        # rgbs = self.points_dataset[video_index]['video'] # list of H,W,C uint8 images
+        # depth = self.depth_dataset[video_name]
+        rgbs = frames
+        depth = depth_frames
+
+        trajs = self.points_dataset[video_index]['points'] # N,S,2 array
+        valids = 1-self.points_dataset[video_index]['occluded'] # N,S array
+        # note the annotations are only valid when not occluded
+        
+        target_occ = self.points_dataset[video_index]['occluded']
+        # note the annotations are only valid when not occluded
+        target_points = self.points_dataset[video_index]['points'].copy()
+        target_points *= np.array(
+            [self.image_size[1] - 1, self.image_size[0] - 1]
+        )
+        
+        if self.queried_first:
+            converted = sample_queries_first(target_occ, target_points, frames)
+        else:
+            converted = sample_queries_strided(target_occ, target_points, frames)
+        assert converted["target_points"].shape[1] == converted["query_points"].shape[1]
+        
+        trajs = trajs.transpose(1,0,2) # S,N,2
+        valids = valids.transpose(1,0) # S,N
+
+        # vis_ok = valids[0] > 0
+        # trajs = trajs[:,vis_ok]
+        # valids = valids[:,vis_ok]
+
+        # 1.0,1.0 should lie at the bottom-right corner pixel
+        H, W, C = rgbs[0].shape
+        trajs[:,:,0] *= W-1
+        trajs[:,:,1] *= H-1
+        
+        a, b, c = self.proportions 
+
+        rgbs = np.stack([
+            a * depth[:, :, :, 0] + (1 - a) * rgbs[:, :, :, 0],  # First channel blend
+            b * depth[:, :, :, 0] + (1 - b) * rgbs[:, :, :, 1],  # Second channel blend
+            c * depth[:, :, :, 0] + (1 - c) * rgbs[:, :, :, 2]   # Third channel blend
+        ], axis=3)  # Stack along the channel dimension
+
+        
+        rgbs = torch.from_numpy(np.stack(rgbs,0)).permute(0,3,1,2) # S,C,H,W
+        trajs = torch.from_numpy(trajs) # S,N,2
+        valids = torch.from_numpy(valids) # S,N
+
+        query_points = torch.from_numpy(converted["query_points"])[0]  # T, N
+        
+        sample = {
+            'rgbs': rgbs,
+            'trajs': trajs,
+            'valids': valids,
+            'visibs': valids,
+            'query_points': query_points,
+        }
+        return sample
+
+    def __len__(self):
+        return len(self.points_dataset)
