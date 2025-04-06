@@ -56,7 +56,7 @@ class DefaultConfig:
     n_iters: int = 6
 
     seed: int = 0
-    gpu_idx: int = 2
+    gpu_idx: int = 0
     local_extent: int = 50
 
     v2: bool = False
@@ -125,11 +125,13 @@ def run_eval(cfg: DefaultConfig):
     
     from pathlib import Path
     sys.path.append(str(Path(__file__).parent.parent))
-    from data_utils import get_sketch_data_path, get_depth_root_from_data_root
+    from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
     exp_type, set_type = cfg.mode.split('_')[0], '_'.join(cfg.mode.split('_')[1:])
     
     if exp_type == 'sketch':
         PATHS = get_sketch_data_path(cfg.data_root)
+    elif exp_type == 'perturbed':
+        PATHS = get_perturbed_data_path(cfg.data_root)
         
     dataset_type, dataset_root, queried_first = PATHS[set_type]
     
@@ -144,6 +146,17 @@ def run_eval(cfg: DefaultConfig):
             queried_first=queried_first,
             resize_to=[256, 256]
         )
+    elif exp_type == 'perturbed':
+        from mydataset import TapVidPerturbedDataset
+        
+        test_dataset = TapVidPerturbedDataset(
+            dataset_type=dataset_type,
+            data_root=dataset_root,
+            depth_root=cfg.pvideo_root,
+            proportions=cfg.proportions,
+            queried_first=queried_first,
+            resize_to=[256, 256]
+        )        
 
     # Creating the DataLoader object
     test_dataloader = torch.utils.data.DataLoader(
@@ -158,7 +171,7 @@ def run_eval(cfg: DefaultConfig):
     import time
 
     start = time.time()
-    log_file = os.path.join(cfg.exp_dir, f"result_eval_whole.json")
+    # log_file = os.path.join(cfg.exp_dir, f"result_eval_whole.json")
     evaluate_result = evaluator.evaluate_sequence(
         predictor, test_dataloader, dataset_name=cfg.mode
     )
@@ -182,6 +195,7 @@ cs.store(name="default_config_eval", node=DefaultConfig)
 @hydra.main(config_path="./", config_name="default_config_eval")
 def evaluate(cfg: DefaultConfig) -> None:
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.gpu_idx)
     run_eval(cfg)
 

@@ -30,9 +30,9 @@ read prop1 prop2 prop3 <<< $PROPORTIONS
 IMAGE_SIZE="256 256"
 
 CONFIG="config"
-CHECKPOINT="/home/czk/ckpts/scaled_offline.pth"
+CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/co-tracker/checkpoints/scaled_offline.pth"
 
-CUDA_VISIBLE_DEVICES=$DEVICE_ID $PYTHON_PATH eval.py \
+ $PYTHON_PATH eval_perturbed.py \
     --config-name $CONFIG \
         checkpoint=$CHECKPOINT \
         mode=$SETTYPE'_'$DATASET \
@@ -43,3 +43,4 @@ CUDA_VISIBLE_DEVICES=$DEVICE_ID $PYTHON_PATH eval.py \
         proportions.1=$prop2 \
         proportions.2=$prop3 \
         exp_dir=logs/$EXP_NAME \
+        gpu_idx=$DEVICE_ID \
