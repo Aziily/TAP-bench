@@ -29,7 +29,7 @@ fi
 IMAGE_SIZE="512 896"
 
 CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/pips2/reference_model"
-
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 CUDA_VISIBLE_DEVICES=$DEVICE_ID $PYTHON_PATH eval.py \
     --init_dir $CHECKPOINT \
     --mode  $SETTYPE'_'$DATASET \

@@ -32,7 +32,7 @@ IMAGE_SIZE="256 256"
 CONFIG="config"
 CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/co-tracker/checkpoints/scaled_offline.pth"
 
- $PYTHON_PATH eval_perturbed.py \
+ $PYTHON_PATH eval.py \
     --config-name $CONFIG \
         checkpoint=$CHECKPOINT \
         mode=$SETTYPE'_'$DATASET \

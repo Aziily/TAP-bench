@@ -163,12 +163,16 @@ class TapVidDavis(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data)
 
-def read_videos(folder_path, video_suffix="*.mp4", rgb=False):
+def read_videos(folder_path, video_suffix="*.mp4",type='davis',rgb=False):
     depth_videos = {}
     video_paths = glob.glob(os.path.join(folder_path, video_suffix))
     
     for video_path in video_paths:
-        video_name = os.path.basename(video_path).replace(video_suffix[1:], "")
+        if type == 'kinetics':
+            video_name = int(os.path.basename(video_path).replace(video_suffix[5:], "").split("_")[-1])
+        else:
+            video_name = os.path.basename(video_path).replace(video_suffix[1:], "")
+            
         cap = cv2.VideoCapture(video_path)
         frames = []
         
@@ -205,15 +209,13 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         self.proportions = proportions
         self.queried_first = queried_first
         self.image_size = image_size
+        self.depth_root = depth_root
         
         if self.dataset_type == "kinetics":
-            all_paths = glob.glob(os.path.join(data_root, "*_of_0010.pkl"))
-            points_dataset = []
-            for pickle_path in all_paths:
-                with open(pickle_path, "rb") as f:
-                    data = pickle.load(f)
-                    points_dataset = points_dataset + data
-            self.points_dataset = points_dataset
+            self.all_paths = glob.glob(os.path.join(data_root, "*_of_0010.pkl"))
+            self.curr_path_idx = -1
+            self.global_file_idx = 0
+            self.points_dataset = [] # initialize to empty list
 
         elif self.dataset_type == "robotap":
             all_paths = glob.glob(os.path.join(data_root, "robotap_split*.pkl"))
@@ -231,28 +233,49 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         else:
             with open(data_root, "rb") as f:
                 self.points_dataset = pickle.load(f)
-        
-        self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
-        self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
+
+        if self.dataset_type != "kinetics":        
+            self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+            self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
             
         if self.dataset_type == "davis":
             self.video_names = list(self.points_dataset.keys())
         elif self.dataset_type == "stacking":
-            self.video_names = [f"video_{i:04d}" for i in range(len(self.points_dataset))]
+            self.video_names = [f"{i:04d}" for i in range(len(self.points_dataset))]
             
         print("found %d unique videos in %s" % (len(self.points_dataset), data_root))
-
+        
+    def load_pickle_file(self):
+        with open(self.all_paths[self.curr_path_idx], "rb") as f:
+            data = pickle.load(f)
+        return data
         
     def __getitem__(self, index):
-        if self.dataset_type in ["davis", "stacking"]:
+        if self.dataset_type in ["davis", "stacking", "robotap"]:
             video_name = self.video_names[index]
         else:
             video_name = index
             
-        if self.dataset_type == "davis":
+        if self.dataset_type in ["davis", "robotap"]:
             video_index = video_name
         else:
             video_index = index
+            
+        if self.dataset_type == 'kinetics':
+            pkl_index = index - self.global_file_idx # index within the current pickle file
+            if pkl_index >= len(self.points_dataset):
+                self.global_file_idx+=len(self.points_dataset)
+                self.curr_path_idx+=1
+                print("reading pickle file")
+                self.points_dataset = self.load_pickle_file()
+                print("reading depth file")
+                self.depth_dataset = read_videos(self.depth_root, f"000{self.curr_path_idx}*_vis.mp4", type='kinetics')
+                print("reading video file")
+                self.video_dataset = read_videos(self.depth_root, f"000{self.curr_path_idx}*_src.mp4", type='kinetics', rgb=True)
+                print("reading done!")
+                pkl_index = index - self.global_file_idx # index within the new pickle file
+            video_name = pkl_index     
+            video_index = pkl_index
             
         frames = self.video_dataset[video_name]
         depth_frames = self.depth_dataset[video_name]
@@ -299,9 +322,9 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         trajs = trajs.transpose(1,0,2) # S,N,2
         valids = valids.transpose(1,0) # S,N
 
-        # vis_ok = valids[0] > 0
-        # trajs = trajs[:,vis_ok]
-        # valids = valids[:,vis_ok]
+        vis_ok = valids[0] > 0
+        trajs = trajs[:,vis_ok]
+        valids = valids[:,vis_ok]
 
         # 1.0,1.0 should lie at the bottom-right corner pixel
         H, W, C = rgbs[0].shape
@@ -333,4 +356,6 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         return sample
 
     def __len__(self):
+        if self.dataset_type == "kinetics":
+            return 1071
         return len(self.points_dataset)

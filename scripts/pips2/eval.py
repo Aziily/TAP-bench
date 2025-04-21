@@ -169,6 +169,91 @@ def test_on_fullseq(model, d, sw, iters=8, S_max=8, image_size=(384,512)):
 
     return metrics
 
+def eval_cycle(model, model_name, mode, data_root, video_path, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir):
+    writer_x = SummaryWriter(log_dir + '/' + model_name + '/x', max_queue=10, flush_secs=60)
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent.parent))
+    sys.path.append("../")
+    from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
+    exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
+    
+    if exp_type == 'sketch':
+        PATHS = get_sketch_data_path(data_root)
+    elif exp_type == 'perturbed':
+        PATHS = get_perturbed_data_path(data_root)
+        
+    dataset_type, dataset_root, queried_first = PATHS[set_type]
+    print('loading %s dataset...' % dataset_type, dataset_root, "proportions", proportions, "image_size", image_size)
+    
+    if exp_type == 'sketch':
+        dataset_x = TapVidDepthDavis(
+            dataset_type=dataset_type,
+            data_root=dataset_root,
+            depth_root=get_depth_root_from_data_root(dataset_root),
+            proportions=proportions,
+            queried_first=queried_first,
+            image_size=image_size,
+        )
+    elif exp_type == 'perturbed':
+        dataset_x = TapVidDepthDavis(
+            dataset_type=dataset_type,
+            data_root=dataset_root,
+            depth_root=os.path.join(video_path, "video_depth_anything"),
+            proportions=proportions,
+            queried_first=queried_first,
+            image_size=image_size,
+        )
+                
+    dataloader_x = DataLoader(
+        dataset_x,
+        batch_size=1,
+        shuffle=shuffle,
+        num_workers=1)
+    iterloader_x = iter(dataloader_x)    
+    
+    pools_x = create_pools(n_pool)
+
+    global_step = 0
+    max_iters = min(max_iters, len(dataset_x))
+    while global_step < max_iters:
+        global_step += 1
+        iter_start_time = time.time()
+        with torch.no_grad():
+            torch.cuda.empty_cache()
+        sw_x = utils.improc.Summ_writer(
+            writer=writer_x,
+            global_step=global_step,
+            log_freq=log_freq,
+            fps=min(S,8),
+            scalar_freq=1,
+            just_gif=True)
+        try:
+            sample = next(iterloader_x)
+        except StopIteration:
+            iterloader_x = iter(dataloader_x)
+            sample = next(iterloader_x)
+        if sample['trajs'].shape[2] == 0:
+            print("encounter 0 points sample")
+            continue
+        iter_rtime = time.time()-iter_start_time
+        with torch.no_grad():
+            metrics = test_on_fullseq(model, sample, sw_x, iters=iters, S_max=S, image_size=image_size)
+        for key in list(pools_x.keys()):
+            if key in metrics:
+                pools_x[key].update([metrics[key]])
+                sw_x.summ_scalar('_/%s' % (key), pools_x[key].mean())
+        iter_itime = time.time()-iter_start_time
+        
+        print('%s; step %06d/%d; rtime %.2f; itime %.2f; d_x %.1f; sur_x %.1f; med_x %.1f' % (
+            model_name, global_step, max_iters, iter_rtime, iter_itime,
+            pools_x['d_avg'].mean(), pools_x['survival'].mean(), pools_x['median_l2'].mean()))
+        
+    with open(os.path.join(log_dir, 'metrics.json'), 'w') as f:
+        json.dump({'d_avg': pools_x['d_avg'].mean(), 'survival': pools_x['survival'].mean(), 'median_l2': pools_x['median_l2'].mean()}, f)
+            
+    writer_x.close()
+    return pools_x['d_avg'].mean()
+
 def main(
         B=1, # batchsize 
         S=128, # seqlen
@@ -179,7 +264,7 @@ def main(
         log_freq=99, # how often to make image summaries
         max_iters=30, # how many samples to test
         log_dir='./logs_test_on_tap',
-        mode="tapvid_rgb_stacking_first",
+        mode="depth_tapvid_davis_first",
         data_root="./datasets/tap/sketch_tapvid_rgbs",
         proportions=[0.0, 0.0, 0.0],
         init_dir='./reference_model',
@@ -208,35 +293,7 @@ def main(
     model_name = model_name + '_' + model_date
     print('model_name', model_name)
     
-    writer_x = SummaryWriter(log_dir + '/' + model_name + '/x', max_queue=10, flush_secs=60)
-
-    from pathlib import Path
-    sys.path.append(str(Path(__file__).parent.parent))
-    sys.path.append("../")
-    from data_utils import get_sketch_data_path, get_depth_root_from_data_root
     exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
-    
-    if exp_type == 'sketch':
-        PATHS = get_sketch_data_path(data_root)
-        
-    dataset_type, dataset_root, queried_first = PATHS[set_type]
-    print('loading %s dataset...' % dataset_type, dataset_root, "proportions", proportions, "image_size", image_size)
-    
-    if exp_type == 'sketch':
-        dataset_x = TapVidDepthDavis(
-            dataset_type=dataset_type,
-            data_root=dataset_root,
-            depth_root=get_depth_root_from_data_root(dataset_root),
-            proportions=proportions,
-            queried_first=queried_first,
-            image_size=image_size,
-        )
-    dataloader_x = DataLoader(
-        dataset_x,
-        batch_size=1,
-        shuffle=shuffle,
-        num_workers=1)
-    iterloader_x = iter(dataloader_x)
 
     model = Pips(stride=stride).to(device)
     model = torch.nn.DataParallel(model, device_ids=device_ids)
@@ -246,44 +303,60 @@ def main(
     _ = saverloader.load(init_dir, model.module)
     model.eval()
 
-    pools_x = create_pools(n_pool)
-
-    global_step = 0
-    max_iters = min(max_iters, len(dataset_x))
-    while global_step < max_iters:
-        global_step += 1
-        iter_start_time = time.time()
-        with torch.no_grad():
-            torch.cuda.empty_cache()
-        sw_x = utils.improc.Summ_writer(
-            writer=writer_x,
-            global_step=global_step,
-            log_freq=log_freq,
-            fps=min(S,8),
-            scalar_freq=1,
-            just_gif=True)
-        try:
-            sample = next(iterloader_x)
-        except StopIteration:
-            iterloader_x = iter(dataloader_x)
-            sample = next(iterloader_x)
-        iter_rtime = time.time()-iter_start_time
-        with torch.no_grad():
-            metrics = test_on_fullseq(model, sample, sw_x, iters=iters, S_max=S, image_size=image_size)
-        for key in list(pools_x.keys()):
-            if key in metrics:
-                pools_x[key].update([metrics[key]])
-                sw_x.summ_scalar('_/%s' % (key), pools_x[key].mean())
-        iter_itime = time.time()-iter_start_time
-        
-        print('%s; step %06d/%d; rtime %.2f; itime %.2f; d_x %.1f; sur_x %.1f; med_x %.1f' % (
-            model_name, global_step, max_iters, iter_rtime, iter_itime,
-            pools_x['d_avg'].mean(), pools_x['survival'].mean(), pools_x['median_l2'].mean()))
-        
-    with open(os.path.join(log_dir, 'metrics.json'), 'w') as f:
-        json.dump({'d_avg': pools_x['d_avg'].mean(), 'survival': pools_x['survival'].mean(), 'median_l2': pools_x['median_l2'].mean()}, f)
+    if exp_type == 'sketch':
+        eval_cycle(model, model_name, mode, data_root, data_root, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir)
+    elif exp_type == 'perturbed':
+        output_file = "evaluation_results.txt"
+        total = {}
+        pert_sev_results = {}  # New dictionary for storing perturbation-severity pairs
+        pert_root = os.path.join(data_root, "perturbations")
+        for perturbation in os.listdir(pert_root):
+            pert_path = os.path.join(pert_root, perturbation)
             
-    writer_x.close()
+            for severity in range(1, 6, 2):  # Loop through severity levels
+                sev_path = os.path.join(pert_path, f"severity_{severity}")
+                print(sev_path)
+
+                # Evaluate for current perturbation-severity pair
+                score = eval_cycle(model, model_name, mode, data_root, sev_path, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir)
+
+                # Store results for perturbation-severity pair
+                key = f"{perturbation}-severity_{severity}"
+                pert_sev_results[key] = score
+
+                print(f"Processed {key}")
+
+                # Aggregate per perturbation
+                total.setdefault(perturbation, []).append(score)
+
+        # Compute final per-perturbation averages
+        perturbation_avg = {
+            perturbation: np.mean(total[perturbation])
+            for perturbation in total
+        }
+
+        # Compute final overall averages
+        results = {
+            'average_pts_within_thresh': np.mean(list(total.values()))
+        }
+
+        # Save results to a file
+        with open(output_file, "w") as f:
+            # Write perturbation-severity pair results
+            f.write("Results for each perturbation-severity pair:\n")
+            for key, scores in pert_sev_results.items():
+                f.write(f"{key}: {scores}\n")
+
+
+        # Print final per-perturbation averages
+        print("\nAverage Results for each perturbation:")
+        for perturbation, scores in perturbation_avg.items():
+            print(f"{perturbation}: {scores}")
+
+        # Print final overall results
+        print("\nFinal Results:")
+        for metric, score in results.items():
+            print(f"{metric}: {score:.4f}")   
             
 if __name__ == '__main__':
     args = parse_args()

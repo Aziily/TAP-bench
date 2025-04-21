@@ -386,57 +386,10 @@ def summarize_all_points(outputs, targets):
     targets_sum["full_seq_target"][0]["query_frames"] = torch.cat(targets_sum["full_seq_target"][0]["query_frames"], dim=0)
     return outputs_sum, targets_sum
 
-
-def main(args):
-    # utils.init_distributed_mode(args)
-    # load cfg file and update the args
-    print("Loading config file from {}".format(args.config_file))
-    time.sleep(args.rank * 0.02)
-    cfg = SLConfig.fromfile(args.config_file)
-    if args.options is not None:
-        cfg.merge_from_dict(args.options)
-    cfg_dict = cfg._cfg_dict.to_dict()
-    args_vars = vars(args)
-    for k,v in cfg_dict.items():
-        if k == "mode":
-            continue
-        if k not in args_vars:
-            setattr(args, k, v)
-        else:
-            raise ValueError("Key {} can used by args only".format(k))
-    print(args)
-
-    device = torch.device(args.device)
-
-    # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-
-    # build model
-    model, _, _ = build_model_main(args)
-    if not args.eval_checkpoint:
-        args.eval_checkpoint = os.path.join(args.output_dir, 'checkpoint.pth')
-    checkpoint = torch.load(args.eval_checkpoint, map_location='cpu')
-    model.to(device)
-    model.eval()
-    print("loading checkpoint from {}".format(args.eval_checkpoint))
-    use_ema_model = getattr(args, 'use_ema', False)
-    if not use_ema_model:
-        model.load_state_dict(checkpoint['model'])
-    else:
-        model_state_dict = {}
-        for name, value in checkpoint["ema_model"].items():
-            model_state_dict[name.replace("module.", "")] = value
-        model.load_state_dict(model_state_dict)
-
+def eval_cycle(device, model, evaluator, video_path):
     # dataset
     # dataset_val = build_dataset(image_set=args.mode, args=args)  # val
-    dataset_val = build_tapvid(image_set=args.mode, args=args)  # val
-
-    # Evaluator
-    evaluator = Evaluator(args.output_dir, args.eval_checkpoint.split("/")[-1].split(".")[0])
+    dataset_val = build_tapvid(video_path, image_set=args.mode, args=args)  # val
 
     # Run evaluate.
     metrics = {}
@@ -514,7 +467,123 @@ def main(args):
         main_result = "\n========= Main Results \n" + f"AJ     : {evaluate_result['average_jaccard']} \nDelta_x: {evaluate_result['average_pts_within_thresh']} \nOA     : {evaluate_result['occlusion_accuracy']}"
         print(main_result)
         f.write(all_result)
-        f.write(main_result)
+        f.write(main_result)        
+    return evaluate_result
+
+def main(args):
+    # utils.init_distributed_mode(args)
+    # load cfg file and update the args
+    print("Loading config file from {}".format(args.config_file))
+    time.sleep(args.rank * 0.02)
+    cfg = SLConfig.fromfile(args.config_file)
+    if args.options is not None:
+        cfg.merge_from_dict(args.options)
+    cfg_dict = cfg._cfg_dict.to_dict()
+    args_vars = vars(args)
+    for k,v in cfg_dict.items():
+        if k == "mode":
+            continue
+        if k not in args_vars:
+            setattr(args, k, v)
+        else:
+            raise ValueError("Key {} can used by args only".format(k))
+    print(args)
+
+    device = torch.device(args.device)
+
+    # fix the seed for reproducibility
+    seed = args.seed + utils.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # build model
+    model, _, _ = build_model_main(args)
+    if not args.eval_checkpoint:
+        args.eval_checkpoint = os.path.join(args.output_dir, 'checkpoint.pth')
+    checkpoint = torch.load(args.eval_checkpoint, map_location='cpu')
+    model.to(device)
+    model.eval()
+    print("loading checkpoint from {}".format(args.eval_checkpoint))
+    use_ema_model = getattr(args, 'use_ema', False)
+    if not use_ema_model:
+        model.load_state_dict(checkpoint['model'])
+    else:
+        model_state_dict = {}
+        for name, value in checkpoint["ema_model"].items():
+            model_state_dict[name.replace("module.", "")] = value
+        model.load_state_dict(model_state_dict)
+
+
+    # Evaluator
+    evaluator = Evaluator(args.output_dir, args.eval_checkpoint.split("/")[-1].split(".")[0])
+    output_file = "evaluation_results.txt"
+    total_oa = {}
+    total_aj = {}
+    total_dx = {}
+    pert_sev_results = {}  # New dictionary for storing perturbation-severity pairs
+    pert_root = os.path.join(args.data_root, "perturbations")
+    for perturbation in os.listdir(pert_root):
+        pert_path = os.path.join(pert_root, perturbation)
+        
+        for severity in range(1, 6, 2):  # Loop through severity levels
+            sev_path = os.path.join(pert_path, f"severity_{severity}")
+            print(sev_path)
+
+            # Evaluate for current perturbation-severity pair
+            score = eval_cycle(device, model, evaluator, sev_path)
+
+            # Store results for perturbation-severity pair
+            key = f"{perturbation}-severity_{severity}"
+            pert_sev_results[key] = {
+                'occlusion_accuracy': score['occlusion_accuracy'],
+                'average_jaccard': score['average_jaccard'],
+                'average_pts_within_thresh': score['average_pts_within_thresh']
+            }
+
+            print(f"Processed {key}")
+
+            # Aggregate per perturbation
+            total_oa.setdefault(perturbation, []).append(score['occlusion_accuracy'])
+            total_aj.setdefault(perturbation, []).append(score['average_jaccard'])
+            total_dx.setdefault(perturbation, []).append(score['average_pts_within_thresh'])
+
+    # Compute final per-perturbation averages
+    perturbation_avg = {
+        perturbation: {
+            'occlusion_accuracy': np.mean(total_oa[perturbation]),
+            'average_jaccard': np.mean(total_aj[perturbation]),
+            'average_pts_within_thresh': np.mean(total_dx[perturbation])
+        }
+        for perturbation in total_oa
+    }
+
+    # Compute final overall averages
+    results = {
+        'occlusion_accuracy': np.mean(list(total_oa.values())),
+        'average_jaccard': np.mean(list(total_aj.values())),
+        'average_pts_within_thresh': np.mean(list(total_dx.values()))
+    }
+
+    # Save results to a file
+    with open(output_file, "w") as f:
+        # Write perturbation-severity pair results
+        f.write("Results for each perturbation-severity pair:\n")
+        for key, scores in pert_sev_results.items():
+            f.write(f"{key}: {scores}\n")
+
+
+    # Print final per-perturbation averages
+    print("\nAverage Results for each perturbation:")
+    for perturbation, scores in perturbation_avg.items():
+        print(f"{perturbation}: {scores}")
+
+    # Print final overall results
+    print("\nFinal Results:")
+    for metric, score in results.items():
+        print(f"{metric}: {score:.4f}")           
+    
+
         
 
 if __name__ == '__main__':

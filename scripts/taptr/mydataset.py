@@ -431,12 +431,16 @@ class TapVidDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.points_dataset)
 
-def read_videos(folder_path, video_suffix="*.mp4", rgb=False):
+def read_videos(folder_path, video_suffix="*.mp4",type='davis',rgb=False):
     depth_videos = {}
     video_paths = glob.glob(os.path.join(folder_path, video_suffix))
     
     for video_path in video_paths:
-        video_name = os.path.basename(video_path).replace(video_suffix[1:], "")
+        if type == 'kinetics':
+            video_name = int(os.path.basename(video_path).replace(video_suffix[5:], "").split("_")[-1])
+        else:
+            video_name = os.path.basename(video_path).replace(video_suffix[1:], "")
+            
         cap = cv2.VideoCapture(video_path)
         frames = []
         
@@ -456,7 +460,6 @@ def read_videos(folder_path, video_suffix="*.mp4", rgb=False):
                 frames = np.concatenate([frames] * 3, axis=-1)
             
             depth_videos[video_name] = frames
-            # print(f"Loaded {video_name} with shape {frames.shape}")
             
     return depth_videos
 
@@ -470,14 +473,13 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
         self.align_corners = align_corners
         self.queried_first = queried_first
         self.proportions = proportions
+        self.depth_root = depth_root
+        
         if self.dataset_type == "kinetics":
-            all_paths = glob.glob(os.path.join(data_root, "*_of_0010.pkl"))
-            points_dataset = []
-            for pickle_path in all_paths:
-                with open(pickle_path, "rb") as f:
-                    data = pickle.load(f)
-                    points_dataset = points_dataset + data
-            self.points_dataset = points_dataset
+            self.all_paths = glob.glob(os.path.join(data_root, "*_of_0010.pkl"))
+            self.curr_path_idx = -1
+            self.global_file_idx = 0
+            self.points_dataset = [] # initialize to empty list
 
         elif self.dataset_type == "robotap":
             all_paths = glob.glob(os.path.join(data_root, "robotap_split*.pkl"))
@@ -496,9 +498,9 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
         else:
             with open(data_root, "rb") as f:
                 self.points_dataset = pickle.load(f)
-        
-        self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
-        self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
+        if self.dataset_type != "kinetics":
+            self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+            self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
         
         if self.dataset_type == "davis":
             self.video_names = list(self.points_dataset.keys())
@@ -542,7 +544,12 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
             points_occ = np.concatenate((points_occ, padding_points_occ), axis=0)
         
         return points_xy, points_occ
-        
+    
+    def load_pickle_file(self):
+        with open(self.all_paths[self.curr_path_idx], "rb") as f:
+            data = pickle.load(f)
+        return data
+    
     def __getitem__(self, index):
         if self.dataset_type in ["davis", "stacking"]:
             video_name = self.video_names[index]
@@ -553,7 +560,23 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
             video_index = video_name
         else:
             video_index = index
-
+            
+        if self.dataset_type == 'kinetics':
+            pkl_index = index - self.global_file_idx # index within the current pickle file
+            if pkl_index >= len(self.points_dataset):
+                self.global_file_idx+=len(self.points_dataset)
+                self.curr_path_idx+=1
+                print("reading pickle file")
+                self.points_dataset = self.load_pickle_file()
+                print("reading depth file")
+                self.depth_dataset = read_videos(self.depth_root, f"000{self.curr_path_idx}*_vis.mp4", type='kinetics')
+                print("reading video file")
+                self.video_dataset = read_videos(self.depth_root, f"000{self.curr_path_idx}*_src.mp4", type='kinetics', rgb=True)
+                print("reading done!")
+                pkl_index = index - self.global_file_idx # index within the new pickle file
+            video_name = pkl_index     
+            video_index = pkl_index
+            
         frames = self.video_dataset[video_name]
         depth_frames = self.depth_dataset[video_name]
 
@@ -698,20 +721,24 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
         return samples, targets, seq_name
     
     def __len__(self):
+        if self.dataset_type == "kinetics":
+            return 1071
         return len(self.points_dataset)
         
 
-def build_tapvid(image_set, args):
+def build_tapvid(video_path, image_set, args):
     
     from pathlib import Path
     sys.path.append(str(Path(__file__).parent.parent))
-    from data_utils import get_sketch_data_path, get_depth_root_from_data_root
+    from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
     exp_type, set_type = image_set.split('_')[0], '_'.join(image_set.split('_')[1:])
     
     root = Path(args.data_root)
     
     if exp_type == 'sketch':
         PATHS = get_sketch_data_path(root)
+    elif exp_type == 'perturbed':
+        PATHS = get_perturbed_data_path(root)
         
     dataset_type, dataset_root, queried_first = PATHS[set_type]
     # add some hooks to datasets
@@ -723,6 +750,19 @@ def build_tapvid(image_set, args):
         dataset = TapVidDepthDataset(
             dataset_root,
             depth_root=get_depth_root_from_data_root(dataset_root),
+            dataset_type=dataset_type,
+            resize_to_256=True,
+            queried_first=queried_first,
+            transforms=transforms, 
+            aux_target_hacks=aux_target_hacks_list,
+            num_queries_per_video=args.num_queries_per_video_eval,
+            align_corners=align_corners,
+            proportions=args.proportions,
+        )
+    elif exp_type == 'perturbed':
+        dataset = TapVidDepthDataset(
+            dataset_root,
+            depth_root=os.path.join(video_path, "video_depth_anything"),
             dataset_type=dataset_type,
             resize_to_256=True,
             queried_first=queried_first,
