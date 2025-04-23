@@ -14,6 +14,7 @@ from lightning.pytorch.loggers import WandbLogger, CSVLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
 import torch
 from torch.utils.data import DataLoader
+import numpy as np
 
 from models.locotrack_model import LocoTrack
 import model_utils
@@ -98,6 +99,7 @@ class LocoTrackModel(L.LightningModule):
             sync_dist=True,
         )
         logging.info(f"Batch {batch_idx}: {metrics}")
+        return metrics
         
     def configure_optimizers(self):
         weights = [p for n, p in self.named_parameters() if 'bias' not in n]
@@ -113,6 +115,25 @@ class LocoTrackModel(L.LightningModule):
         
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
+def eval_cycle(model, mode, val_dataset_path, video_path, image_size, proportions, logger, precision, ckpt_path):
+    eval_dataset = get_eval_dataset(
+        mode=mode,
+        path=val_dataset_path,
+        video_path=video_path,
+        resolution=image_size,
+        proportions=proportions,
+    )
+    eval_dataloder = {
+        k: DataLoader(
+            v,
+            batch_size=1,
+            shuffle=False,
+        ) for k, v in eval_dataset.items()
+    }
+    
+    trainer = L.Trainer(strategy='ddp', logger=logger, precision=precision)
+    result = trainer.test(model, eval_dataloder, ckpt_path=ckpt_path)
+    return result
 
 def train(
     mode: str,
@@ -167,23 +188,75 @@ def train(
         auto_insert_metric_name=True,
         save_on_train_epoch_end=False,
     )
+    exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
+    if exp_type == 'sketch':
+        eval_cycle(model, mode, val_dataset_path, val_dataset_path, image_size, proportions, logger, precision, ckpt_path)
+    elif exp_type == 'perturbed':
+        output_file = "evaluation_results.txt"
+        total_oa = {}
+        total_aj = {}
+        total_dx = {}
+        pert_sev_results = {}  # New dictionary for storing perturbation-severity pairs
+        pert_root = os.path.join(val_dataset_path, "perturbations")
+        for perturbation in os.listdir(pert_root):
+            pert_path = os.path.join(pert_root, perturbation)
+            
+            for severity in range(1, 6, 2):  # Loop through severity levels
+                sev_path = os.path.join(pert_path, f"severity_{severity}")
+                print(sev_path)
 
-    eval_dataset = get_eval_dataset(
-        mode=mode,
-        path=val_dataset_path,
-        resolution=image_size,
-        proportions=proportions,
-    )
-    eval_dataloder = {
-        k: DataLoader(
-            v,
-            batch_size=1,
-            shuffle=False,
-        ) for k, v in eval_dataset.items()
-    }
-    
-    trainer = L.Trainer(strategy='ddp', logger=logger, precision=precision)
-    trainer.test(model, eval_dataloder, ckpt_path=ckpt_path)
+                # Evaluate for current perturbation-severity pair
+                score = eval_cycle(model, mode, val_dataset_path, sev_path, image_size, proportions, logger, precision, ckpt_path)[0]
+                print(score)
+                # Store results for perturbation-severity pair
+                key = f"{perturbation}-severity_{severity}"
+                pert_sev_results[key] = {
+                    'occlusion_accuracy': score['test/occlusion_accuracy'],
+                    'average_jaccard': score['test/average_jaccard'],
+                    'average_pts_within_thresh': score['test/average_pts_within_thresh']
+                }
+
+                print(f"Processed {key}")
+
+                # Aggregate per perturbation
+                total_oa.setdefault(perturbation, []).append(score['test/occlusion_accuracy'])
+                total_aj.setdefault(perturbation, []).append(score['test/average_jaccard'])
+                total_dx.setdefault(perturbation, []).append(score['test/average_pts_within_thresh'])
+
+        # Compute final per-perturbation averages
+        perturbation_avg = {
+            perturbation: {
+                'occlusion_accuracy': np.mean(total_oa[perturbation]),
+                'average_jaccard': np.mean(total_aj[perturbation]),
+                'average_pts_within_thresh': np.mean(total_dx[perturbation])
+            }
+            for perturbation in total_oa
+        }
+
+        # Compute final overall averages
+        results = {
+            'occlusion_accuracy': np.mean(list(total_oa.values())),
+            'average_jaccard': np.mean(list(total_aj.values())),
+            'average_pts_within_thresh': np.mean(list(total_dx.values()))
+        }
+
+        # Save results to a file
+        with open(output_file, "w") as f:
+            # Write perturbation-severity pair results
+            f.write("Results for each perturbation-severity pair:\n")
+            for key, scores in pert_sev_results.items():
+                f.write(f"{key}: {scores}\n")
+
+
+        # Print final per-perturbation averages
+        print("\nAverage Results for each perturbation:")
+        for perturbation, scores in perturbation_avg.items():
+            print(f"{perturbation}: {scores}")
+
+        # Print final overall results
+        print("\nFinal Results:")
+        for metric, score in results.items():
+            print(f"{metric}: {score:.4f}")        
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train or evaluate the LocoTrack model.")

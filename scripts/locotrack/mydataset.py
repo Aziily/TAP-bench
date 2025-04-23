@@ -293,16 +293,18 @@ def create_depth_dataset(
 
         yield {'davis': converted}
     
-def get_eval_dataset(mode, path, resolution=(256, 256), proportions=[0.0, 0.0, 0.0]):
+def get_eval_dataset(mode, path, video_path, resolution=(256, 256), proportions=[0.0, 0.0, 0.0]):
     datasets = {}
     
     from pathlib import Path
     sys.path.append(str(Path(__file__).parent.parent))
-    from data_utils import get_sketch_data_path, get_depth_root_from_data_root
+    from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
     exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
     
     if exp_type == 'sketch':
         PATHS = get_sketch_data_path(path)
+    elif exp_type == 'perturbed':
+        PATHS = get_perturbed_data_path(path)
         
     dataset_type, dataset_root, queried_first = PATHS[set_type]
     
@@ -310,6 +312,16 @@ def get_eval_dataset(mode, path, resolution=(256, 256), proportions=[0.0, 0.0, 0
         dataset = create_depth_dataset(
             data_root=dataset_root,
             depth_root=get_depth_root_from_data_root(dataset_root),
+            proportions=proportions,
+            dataset_type=dataset_type,
+            resolution=resolution,
+            query_mode='first' if queried_first else 'strided',
+        )
+        datasets[set_type] = CustomDataset(dataset, 'davis')
+    elif exp_type == 'perturbed':
+        dataset = create_depth_dataset(
+            data_root=dataset_root,
+            depth_root=os.path.join(video_path, "video_depth_anything"),
             proportions=proportions,
             dataset_type=dataset_type,
             resolution=resolution,
