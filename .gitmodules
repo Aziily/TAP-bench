@@ -10,3 +10,6 @@
 [submodule "repos/TAPTR"]
 	path = repos/TAPTR
 	url = https://github.com/IDEA-Research/TAPTR.git
+[submodule "repos/tapnet"]
+	path = repos/tapnet
+	url = https://github.com/google-deepmind/tapnet.git
