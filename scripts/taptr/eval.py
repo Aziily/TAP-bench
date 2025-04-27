@@ -389,7 +389,7 @@ def summarize_all_points(outputs, targets):
 def eval_cycle(device, model, evaluator, video_path):
     # dataset
     # dataset_val = build_dataset(image_set=args.mode, args=args)  # val
-    dataset_val = build_tapvid(video_path, image_set=args.mode, args=args)  # val
+    dataset_val = build_tapvid(video_path, mode=args.mode, args=args)  # val
 
     # Run evaluate.
     metrics = {}
@@ -457,17 +457,18 @@ def eval_cycle(device, model, evaluator, video_path):
     # Saving the evaluation results to a .log file
     evaluate_result = metrics.pop("avg")
     # result_file = os.path.join(args.output_dir, f"test/{args.eval_checkpoint.split('/')[-1].split('.')[0]}_{args.mode}.log")
-    result_file = os.path.join(args.output_dir, f"metrics.log")
-    print(f"Dumping eval results to {result_file}.")
-    with open(result_file, "w") as f:
-        for name, value in metrics.items():
-            f.write(f"{name}:\n {dict2string(value)} \n")
-        all_result  = "\n========= All Results \n"
-        all_result += dict2string(evaluate_result)
-        main_result = "\n========= Main Results \n" + f"AJ     : {evaluate_result['average_jaccard']} \nDelta_x: {evaluate_result['average_pts_within_thresh']} \nOA     : {evaluate_result['occlusion_accuracy']}"
-        print(main_result)
-        f.write(all_result)
-        f.write(main_result)        
+    # result_file = os.path.join(args.output_dir, f"metrics.log")
+    # print(f"Dumping eval results to {result_file}.")
+    # with open(result_file, "w") as f:
+    #     for name, value in metrics.items():
+    #         f.write(f"{name}:\n {dict2string(value)} \n")
+    #     all_result  = "\n========= All Results \n"
+    #     all_result += dict2string(evaluate_result)
+    #     main_result = "\n========= Main Results \n" + f"AJ     : {evaluate_result['average_jaccard']} \nDelta_x: {evaluate_result['average_pts_within_thresh']} \nOA     : {evaluate_result['occlusion_accuracy']}"
+    #     print(main_result)
+    #     f.write(all_result)
+    #     f.write(main_result)        
+    
     return evaluate_result
 
 def main(args):
@@ -514,75 +515,90 @@ def main(args):
             model_state_dict[name.replace("module.", "")] = value
         model.load_state_dict(model_state_dict)
 
-
-    # Evaluator
     evaluator = Evaluator(args.output_dir, args.eval_checkpoint.split("/")[-1].split(".")[0])
-    output_file = "evaluation_results.txt"
-    total_oa = {}
-    total_aj = {}
-    total_dx = {}
-    pert_sev_results = {}  # New dictionary for storing perturbation-severity pairs
-    pert_root = os.path.join(args.data_root, "perturbations")
-    for perturbation in os.listdir(pert_root):
-        pert_path = os.path.join(pert_root, perturbation)
-        
-        for severity in range(1, 6, 2):  # Loop through severity levels
-            sev_path = os.path.join(pert_path, f"severity_{severity}")
-            print(sev_path)
-
-            # Evaluate for current perturbation-severity pair
-            score = eval_cycle(device, model, evaluator, sev_path)
-
-            # Store results for perturbation-severity pair
-            key = f"{perturbation}-severity_{severity}"
-            pert_sev_results[key] = {
-                'occlusion_accuracy': score['occlusion_accuracy'],
-                'average_jaccard': score['average_jaccard'],
-                'average_pts_within_thresh': score['average_pts_within_thresh']
-            }
-
-            print(f"Processed {key}")
-
-            # Aggregate per perturbation
-            total_oa.setdefault(perturbation, []).append(score['occlusion_accuracy'])
-            total_aj.setdefault(perturbation, []).append(score['average_jaccard'])
-            total_dx.setdefault(perturbation, []).append(score['average_pts_within_thresh'])
-
-    # Compute final per-perturbation averages
-    perturbation_avg = {
-        perturbation: {
-            'occlusion_accuracy': np.mean(total_oa[perturbation]),
-            'average_jaccard': np.mean(total_aj[perturbation]),
-            'average_pts_within_thresh': np.mean(total_dx[perturbation])
-        }
-        for perturbation in total_oa
-    }
-
-    # Compute final overall averages
-    results = {
-        'occlusion_accuracy': np.mean(list(total_oa.values())),
-        'average_jaccard': np.mean(list(total_aj.values())),
-        'average_pts_within_thresh': np.mean(list(total_dx.values()))
-    }
-
-    # Save results to a file
-    with open(output_file, "w") as f:
-        # Write perturbation-severity pair results
-        f.write("Results for each perturbation-severity pair:\n")
-        for key, scores in pert_sev_results.items():
-            f.write(f"{key}: {scores}\n")
-
-
-    # Print final per-perturbation averages
-    print("\nAverage Results for each perturbation:")
-    for perturbation, scores in perturbation_avg.items():
-        print(f"{perturbation}: {scores}")
-
-    # Print final overall results
-    print("\nFinal Results:")
-    for metric, score in results.items():
-        print(f"{metric}: {score:.4f}")           
     
+    exp_type, set_type = args.mode.split('_')[0], '_'.join(args.mode.split('_')[1:])
+    
+    os.makedirs(args.output_dir, exist_ok=True)
+    output_file = os.path.join(args.output_dir, f"evaluation_results.txt")
+
+    if exp_type == 'sketch':
+        score = eval_cycle(device, model, evaluator, args.data_root)
+        
+        with open(output_file, "w") as f:
+            for key, score in score.items():
+                f.write(f"{key}: {score}\n")
+    elif exp_type == 'perturbed':
+        # Evaluator
+        total_oa = {}
+        total_aj = {}
+        total_dx = {}
+        pert_sev_results = {}  # New dictionary for storing perturbation-severity pairs
+        pert_root = os.path.join(args.data_root, "perturbations")
+        for perturbation in os.listdir(pert_root):
+            pert_path = os.path.join(pert_root, perturbation)
+            
+            for severity in range(1, 6, 2):  # Loop through severity levels
+                sev_path = os.path.join(pert_path, f"severity_{severity}")
+                print(sev_path)
+
+                # Evaluate for current perturbation-severity pair
+                score = eval_cycle(device, model, evaluator, sev_path)
+
+                # Store results for perturbation-severity pair
+                key = f"{perturbation}-severity_{severity}"
+                pert_sev_results[key] = {
+                    'occlusion_accuracy': score['occlusion_accuracy'],
+                    'average_jaccard': score['average_jaccard'],
+                    'average_pts_within_thresh': score['average_pts_within_thresh']
+                }
+
+                # print(f"Processed {key}")
+
+                # Aggregate per perturbation
+                total_oa.setdefault(perturbation, []).append(score['occlusion_accuracy'])
+                total_aj.setdefault(perturbation, []).append(score['average_jaccard'])
+                total_dx.setdefault(perturbation, []).append(score['average_pts_within_thresh'])
+                
+        # Compute final per-perturbation averages
+        perturbation_avg = {
+            perturbation: {
+                'occlusion_accuracy': np.mean(total_oa[perturbation]),
+                'average_jaccard': np.mean(total_aj[perturbation]),
+                'average_pts_within_thresh': np.mean(total_dx[perturbation])
+            }
+            for perturbation in total_oa
+        }
+
+        # Compute final overall averages
+        results = {
+            'occlusion_accuracy': np.mean(list(total_oa.values())),
+            'average_jaccard': np.mean(list(total_aj.values())),
+            'average_pts_within_thresh': np.mean(list(total_dx.values()))
+        }
+
+        # Save results to a file
+        with open(output_file, "w") as f:
+            # Summary of all perturbations
+            f.write("Summary of all perturbations\n")
+            for metric, scores in results.items():
+                f.write(f"all-{metric}: {scores}\n")
+            f.write("\n")
+            
+            # Summary of all perturbation-severity pairs
+            f.write("Summary of all perturbation-severity pairs\n")
+            for perturbation in perturbation_avg.keys():
+                # f.write(f"{perturbation}\n")
+                for metric, score in perturbation_avg[perturbation].items():
+                    f.write(f"\t{perturbation}-{metric}: {score}\n")
+            f.write("\n")
+                    
+            # Write perturbation-severity pair results
+            f.write("Results for each perturbation-severity pair\n")
+            for each_perturbation in pert_sev_results.keys():
+                for metric, score in pert_sev_results[each_perturbation].items():
+                    f.write(f"{each_perturbation}-{metric}: {score}\n")
+            f.write("\n")      
 
         
 

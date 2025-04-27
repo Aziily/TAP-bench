@@ -231,7 +231,8 @@ def create_depth_dataset(
     if dataset_type == "davis":
         video_names = list(points_dataset.keys())
     elif dataset_type == "stacking":
-        video_names = [f"video_{i:04d}" for i in range(len(points_dataset))]
+        # video_names = [f"video_{i:04d}" for i in range(len(points_dataset))]
+        video_names = [f"{i:04d}" for i in range(len(points_dataset))]
         
     print("found %d unique videos in %s" % (len(points_dataset), data_root))
     
@@ -291,7 +292,7 @@ def create_depth_dataset(
         else:
             raise ValueError(f'Unknown query mode {query_mode}.')
 
-        yield {'davis': converted}
+        yield {'depth': converted}
     
 def get_eval_dataset(mode, path, video_path, resolution=(256, 256), proportions=[0.0, 0.0, 0.0]):
     datasets = {}
@@ -308,26 +309,16 @@ def get_eval_dataset(mode, path, video_path, resolution=(256, 256), proportions=
         
     dataset_type, dataset_root, queried_first = PATHS[set_type]
     
-    if exp_type == 'sketch':
-        dataset = create_depth_dataset(
-            data_root=dataset_root,
-            depth_root=get_depth_root_from_data_root(dataset_root),
-            proportions=proportions,
-            dataset_type=dataset_type,
-            resolution=resolution,
-            query_mode='first' if queried_first else 'strided',
-        )
-        datasets[set_type] = CustomDataset(dataset, 'davis')
-    elif exp_type == 'perturbed':
-        dataset = create_depth_dataset(
-            data_root=dataset_root,
-            depth_root=os.path.join(video_path, "video_depth_anything"),
-            proportions=proportions,
-            dataset_type=dataset_type,
-            resolution=resolution,
-            query_mode='first' if queried_first else 'strided',
-        )
-        datasets[set_type] = CustomDataset(dataset, 'davis')
+    dataset = create_depth_dataset(
+        data_root=dataset_root,
+        depth_root=get_depth_root_from_data_root(dataset_root) \
+            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+        proportions=proportions,
+        dataset_type=dataset_type,
+        resolution=resolution,
+        query_mode='first' if queried_first else 'strided',
+    )
+    datasets[set_type] = CustomDataset(dataset, 'depth')
 
     if len(datasets) == 0:
         raise ValueError(f'No dataset found for mode {mode}.')

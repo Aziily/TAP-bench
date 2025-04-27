@@ -1,8 +1,10 @@
 .history/
 .vscode/
 
-__pycache__/
+**/__pycache__/
 outputs/
 logs/
+res/
 
+*.egg-info/
 .DS_Store

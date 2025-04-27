@@ -6,13 +6,16 @@ CONDA_ENV_PATH="/home/czk/envs"
 BASE_PATH="/home/czk/anaconda3/bin"
 
 # 实验参数
-SETTYPE="sketch"
+# EXPTYPE="sketch"
+# DATASET="tapvid_rgb_stacking_first"
+# DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/sketch_tapvid_rgbs"
+EXPTYPE="perturbed"
 DATASET="tapvid_rgb_stacking_first"
-DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/sketch_tapvid_rgbs"
+DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/perturbed_tapvid_rgbs"
 PROPORTIONS="0.0 0.0 0.0"
 
 # 保存路径
-IDENTIFIER=$SETTYPE'_'$DATASET'_'${PROPORTIONS// /_}
+IDENTIFIER=$EXPTYPE'_'$DATASET'_'${PROPORTIONS// /_}
 RES_DIR="../res/$IDENTIFIER"
 EXECUTE_LOG_DIR="../logs/$IDENTIFIER"
 mkdir -p $RES_DIR
@@ -24,10 +27,11 @@ EXP_NAME="sketch_rgbs"
 # 方法列表
 ENV_PAIRS=(
     # env_name, dir_name, cuda_id
-    "cotracker cotracker 0"
-    "locotrack locotrack 1"
-    "pips2 pips2 2"
-    "taptr taptr 3"
+    "cotracker cotracker 3"
+    "locotrack locotrack 3"
+    "pips2 pips2 3"
+    # "taptr taptr 3"
+    "tapnet tapnet 3"
 )
 
 SPLITER="========================================================================"
@@ -39,7 +43,7 @@ for env_pair in "${ENV_PAIRS[@]}"; do
     DIR_NAME=${env[1]}
     CUDA_ID=${env[2]}
 
-    if [ "$RUN_TAPTR" = false ] && [ "$ENV_NAME" = "taptr" ]; then
+    if [ "$RUN_TAPTR" = false ] && [ "$DIR_NAME" = "taptr" ]; then
         continue
     fi
 
@@ -47,12 +51,16 @@ for env_pair in "${ENV_PAIRS[@]}"; do
     echo "Running Directory: $DIR_NAME with CUDA_ID: $CUDA_ID"
     echo $SPLITER
 
-    METHOD_LIST="$METHOD_LIST $DIR_NAME"
+    if [ "$DIR_NAME" = "tapnet" ]; then
+        METHOD_LIST="$METHOD_LIST bootstapir tapir"
+    else
+        METHOD_LIST="$METHOD_LIST $DIR_NAME"
+    fi
 
     cd $DIR_NAME
 
     bash run.bash \
-        "$SETTYPE" \
+        "$EXPTYPE" \
         "$DATASET" \
         "$DATAROOT" \
         "$PROPORTIONS" \
@@ -72,4 +80,5 @@ $BASE_PATH/python compose.py \
     --save_dir $RES_DIR \
     --methods $METHOD_LIST \
     --identifier $IDENTIFIER \
-    --exp_name "$EXP_NAME"
+    --exp_name "$EXP_NAME" \
+    --exp_type $EXPTYPE

@@ -1,4 +1,4 @@
-# SETTYPE="sketch"
+# EXPTYPE="sketch"
 # DATASET="tapvid_rgb_stacking_first"
 # DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/sketch_tapvid_rgbs"
 # PROPORTIONS="0.0 0.0 0.0"
@@ -7,13 +7,13 @@
 # PYTHON_PATH="python"
 
 if [ $# -lt 6 ]; then
-    echo "Usage: bash run.sh SETTYPE DATASET DATAROOT PROPORTIONS EXP_NAME PYTHON_PATH"
+    echo "Usage: bash run.sh EXPTYPE DATASET DATAROOT PROPORTIONS EXP_NAME PYTHON_PATH"
     exit
 else
     echo "Running bash run.sh with arguments: $@"
 fi
 
-SETTYPE=$1
+EXPTYPE=$1
 DATASET=$2
 DATAROOT=$3
 PROPORTIONS=$4
@@ -35,7 +35,7 @@ CUDA_VISIBLE_DEVICES=$DEVICE_ID $PYTHON_PATH -u eval.py \
 	-c $CONFIG \
     --eval_checkpoint $CHECKPOINT \
     --num_workers 2 \
-    --mode  $SETTYPE'_'$DATASET \
+    --mode  $EXPTYPE'_'$DATASET \
     --data_root $DATAROOT \
     --proportions $PROPORTIONS \
 	--output_dir logs/$EXP_NAME

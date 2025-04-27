@@ -82,28 +82,17 @@ def eval_cycle(video_path, evaluator, predictor, cfg: DefaultConfig):
         
     dataset_type, dataset_root, queried_first = PATHS[set_type]
     
-    if exp_type == 'sketch':
-        from mydataset import TapVidDepthDataset
-        
-        test_dataset = TapVidDepthDataset(
-            dataset_type=dataset_type,
-            data_root=dataset_root,
-            depth_root=get_depth_root_from_data_root(dataset_root),
-            proportions=cfg.proportions,
-            queried_first=queried_first,
-            resize_to=[256, 256]
-        )
-    elif exp_type == 'perturbed':
-        from mydataset import TapVidPerturbedDataset, TapVidDepthDataset
-        
-        test_dataset = TapVidDepthDataset(
-            dataset_type=dataset_type,
-            data_root=dataset_root,
-            depth_root=os.path.join(video_path, "video_depth_anything"),
-            proportions=cfg.proportions,
-            queried_first=queried_first,
-            resize_to=[256, 256]
-        )        
+    from mydataset import TapVidDepthDataset
+    
+    test_dataset = TapVidDepthDataset(
+        dataset_type=dataset_type,
+        data_root=dataset_root,
+        depth_root=get_depth_root_from_data_root(dataset_root) \
+            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+        proportions=cfg.proportions,
+        queried_first=queried_first,
+        resize_to=[256, 256]
+    ) 
 
     # Creating the DataLoader object
     test_dataloader = torch.utils.data.DataLoader(
@@ -128,11 +117,11 @@ def eval_cycle(video_path, evaluator, predictor, cfg: DefaultConfig):
     # Saving the evaluation results to a .json file
     evaluate_result = evaluate_result["avg"]
     print("evaluate_result", evaluate_result)
-    result_file = os.path.join(cfg.exp_dir, f"result_eval_.json")
     evaluate_result["time"] = end - start
-    print(f"Dumping eval results to {result_file}.")
-    with open(result_file, "w") as f:
-        json.dump(evaluate_result, f)
+    # result_file = os.path.join(cfg.exp_dir, f"result_eval_.json")
+    # print(f"Dumping eval results to {result_file}.")
+    # with open(result_file, "w") as f:
+    #     json.dump(evaluate_result, f)
     
     return evaluate_result
 
@@ -190,11 +179,17 @@ def run_eval(cfg: DefaultConfig):
     sys.path.append(str(Path(__file__).parent.parent))
     exp_type, set_type = cfg.mode.split('_')[0], '_'.join(cfg.mode.split('_')[1:])
     
+    os.makedirs(cfg.exp_dir, exist_ok=True)
+    output_file = os.path.join(cfg.exp_dir, f"evaluation_results.txt")
+    
     if exp_type == 'sketch':
-        eval_cycle(cfg.data_root, evaluator, predictor, cfg)
+        score = eval_cycle(cfg.data_root, evaluator, predictor, cfg)
+        
+        with open(output_file, "w") as f:
+            for key, score in score.items():
+                f.write(f"{key}: {score}\n")
         
     elif exp_type == 'perturbed':
-        output_file = "evaluation_results.txt"
         total_oa = {}
         total_aj = {}
         total_dx = {}
@@ -218,7 +213,7 @@ def run_eval(cfg: DefaultConfig):
                     'average_pts_within_thresh': score['average_pts_within_thresh']
                 }
 
-                print(f"Processed {key}")
+                # print(f"Processed {key}")
 
                 # Aggregate per perturbation
                 total_oa.setdefault(perturbation, []).append(score['occlusion_accuracy'])
@@ -244,21 +239,26 @@ def run_eval(cfg: DefaultConfig):
 
         # Save results to a file
         with open(output_file, "w") as f:
+            # Summary of all perturbations
+            f.write("Summary of all perturbations\n")
+            for metric, scores in results.items():
+                f.write(f"all-{metric}: {scores}\n")
+            f.write("\n")
+            
+            # Summary of all perturbation-severity pairs
+            f.write("Summary of all perturbation-severity pairs\n")
+            for perturbation in perturbation_avg.keys():
+                # f.write(f"{perturbation}\n")
+                for metric, score in perturbation_avg[perturbation].items():
+                    f.write(f"{perturbation}-{metric}: {score}\n")
+            f.write("\n")
+                    
             # Write perturbation-severity pair results
-            f.write("Results for each perturbation-severity pair:\n")
-            for key, scores in pert_sev_results.items():
-                f.write(f"{key}: {scores}\n")
-
-
-        # Print final per-perturbation averages
-        print("\nAverage Results for each perturbation:")
-        for perturbation, scores in perturbation_avg.items():
-            print(f"{perturbation}: {scores}")
-
-        # Print final overall results
-        print("\nFinal Results:")
-        for metric, score in results.items():
-            print(f"{metric}: {score:.4f}")        
+            f.write("Results for each perturbation-severity pair\n")
+            for each_perturbation in pert_sev_results.keys():
+                for metric, score in pert_sev_results[each_perturbation].items():
+                    f.write(f"{each_perturbation}-{metric}: {score}\n")
+            f.write("\n")    
 
 
 cs = hydra.core.config_store.ConfigStore.instance()

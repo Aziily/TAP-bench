@@ -3,7 +3,7 @@
 # DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/sketch_tapvid_rgbs"
 # PROPORTIONS="0.0 0.0 0.0"
 
-# EXP_NAME="locotrack_base"
+# EXP_NAME="tapnet_base"
 # PYTHON_PATH="python"
 
 if [ $# -lt 6 ]; then
@@ -28,14 +28,22 @@ fi
 
 IMAGE_SIZE="256 256"
 
-CONFIG="config.ini"
-CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/locotrack/checkpoint/locotrack_base.ckpt"
+CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/tapnet/checkpoints/bootstapir_checkpoint_v2.pt"
 
 CUDA_VISIBLE_DEVICES=$DEVICE_ID $PYTHON_PATH eval.py \
-    --config $CONFIG \
     --ckpt_path $CHECKPOINT \
     --mode  $EXPTYPE'_'$DATASET \
     --data_root $DATAROOT \
     --proportions $PROPORTIONS \
     --image_size $IMAGE_SIZE \
-    --save_path logs/$EXP_NAME
+    --save_path logs/bootstapir/$EXP_NAME
+
+CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/tapnet/checkpoints/tapir_checkpoint_panning.pt"
+
+CUDA_VISIBLE_DEVICES=$DEVICE_ID $PYTHON_PATH eval.py \
+    --ckpt_path $CHECKPOINT \
+    --mode  $EXPTYPE'_'$DATASET \
+    --data_root $DATAROOT \
+    --proportions $PROPORTIONS \
+    --image_size $IMAGE_SIZE \
+    --save_path logs/tapir/$EXP_NAME

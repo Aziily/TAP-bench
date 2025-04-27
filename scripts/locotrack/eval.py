@@ -133,7 +133,12 @@ def eval_cycle(model, mode, val_dataset_path, video_path, image_size, proportion
     
     trainer = L.Trainer(strategy='ddp', logger=logger, precision=precision)
     result = trainer.test(model, eval_dataloder, ckpt_path=ckpt_path)
-    return result
+    
+    evaluate_result = {
+        key.replace('test/', ''): value for key, value in result[0].items()
+    }
+    
+    return evaluate_result
 
 def train(
     mode: str,
@@ -188,11 +193,20 @@ def train(
         auto_insert_metric_name=True,
         save_on_train_epoch_end=False,
     )
+    
     exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
+    
+    os.makedirs(save_path, exist_ok=True)
+    output_file = os.path.join(save_path, f"evaluation_results.txt")
+    
     if exp_type == 'sketch':
-        eval_cycle(model, mode, val_dataset_path, val_dataset_path, image_size, proportions, logger, precision, ckpt_path)
+        score = eval_cycle(model, mode, val_dataset_path, val_dataset_path, image_size, proportions, logger, precision, ckpt_path)
+    
+        with open(output_file, "w") as f:
+            for key, score in score.items():
+                f.write(f"{key}: {score}\n")
+    
     elif exp_type == 'perturbed':
-        output_file = "evaluation_results.txt"
         total_oa = {}
         total_aj = {}
         total_dx = {}
@@ -206,22 +220,22 @@ def train(
                 print(sev_path)
 
                 # Evaluate for current perturbation-severity pair
-                score = eval_cycle(model, mode, val_dataset_path, sev_path, image_size, proportions, logger, precision, ckpt_path)[0]
-                print(score)
+                score = eval_cycle(model, mode, val_dataset_path, sev_path, image_size, proportions, logger, precision, ckpt_path)
+                # print(score)
                 # Store results for perturbation-severity pair
                 key = f"{perturbation}-severity_{severity}"
                 pert_sev_results[key] = {
-                    'occlusion_accuracy': score['test/occlusion_accuracy'],
-                    'average_jaccard': score['test/average_jaccard'],
-                    'average_pts_within_thresh': score['test/average_pts_within_thresh']
+                    'occlusion_accuracy': score['occlusion_accuracy'],
+                    'average_jaccard': score['average_jaccard'],
+                    'average_pts_within_thresh': score['average_pts_within_thresh']
                 }
 
-                print(f"Processed {key}")
+                # print(f"Processed {key}")
 
                 # Aggregate per perturbation
-                total_oa.setdefault(perturbation, []).append(score['test/occlusion_accuracy'])
-                total_aj.setdefault(perturbation, []).append(score['test/average_jaccard'])
-                total_dx.setdefault(perturbation, []).append(score['test/average_pts_within_thresh'])
+                total_oa.setdefault(perturbation, []).append(score['occlusion_accuracy'])
+                total_aj.setdefault(perturbation, []).append(score['average_jaccard'])
+                total_dx.setdefault(perturbation, []).append(score['average_pts_within_thresh'])
 
         # Compute final per-perturbation averages
         perturbation_avg = {
@@ -242,21 +256,26 @@ def train(
 
         # Save results to a file
         with open(output_file, "w") as f:
+            # Summary of all perturbations
+            f.write("Summary of all perturbations\n")
+            for metric, scores in results.items():
+                f.write(f"all-{metric}: {scores}\n")
+            f.write("\n")
+            
+            # Summary of all perturbation-severity pairs
+            f.write("Summary of all perturbation-severity pairs\n")
+            for perturbation in perturbation_avg.keys():
+                # f.write(f"{perturbation}\n")
+                for metric, score in perturbation_avg[perturbation].items():
+                    f.write(f"{perturbation}-{metric}: {score}\n")
+            f.write("\n")
+                    
             # Write perturbation-severity pair results
-            f.write("Results for each perturbation-severity pair:\n")
-            for key, scores in pert_sev_results.items():
-                f.write(f"{key}: {scores}\n")
-
-
-        # Print final per-perturbation averages
-        print("\nAverage Results for each perturbation:")
-        for perturbation, scores in perturbation_avg.items():
-            print(f"{perturbation}: {scores}")
-
-        # Print final overall results
-        print("\nFinal Results:")
-        for metric, score in results.items():
-            print(f"{metric}: {score:.4f}")        
+            f.write("Results for each perturbation-severity pair\n")
+            for each_perturbation in pert_sev_results.keys():
+                for metric, score in pert_sev_results[each_perturbation].items():
+                    f.write(f"{each_perturbation}-{metric}: {score}\n")
+            f.write("\n")      
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train or evaluate the LocoTrack model.")

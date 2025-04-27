@@ -241,6 +241,7 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         if self.dataset_type == "davis":
             self.video_names = list(self.points_dataset.keys())
         elif self.dataset_type == "stacking":
+            # self.video_names = [f"video_{i:04d}" for i in range(len(self.points_dataset))]
             self.video_names = [f"{i:04d}" for i in range(len(self.points_dataset))]
             
         print("found %d unique videos in %s" % (len(self.points_dataset), data_root))

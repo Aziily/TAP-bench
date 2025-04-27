@@ -185,24 +185,15 @@ def eval_cycle(model, model_name, mode, data_root, video_path, proportions, imag
     dataset_type, dataset_root, queried_first = PATHS[set_type]
     print('loading %s dataset...' % dataset_type, dataset_root, "proportions", proportions, "image_size", image_size)
     
-    if exp_type == 'sketch':
-        dataset_x = TapVidDepthDavis(
-            dataset_type=dataset_type,
-            data_root=dataset_root,
-            depth_root=get_depth_root_from_data_root(dataset_root),
-            proportions=proportions,
-            queried_first=queried_first,
-            image_size=image_size,
-        )
-    elif exp_type == 'perturbed':
-        dataset_x = TapVidDepthDavis(
-            dataset_type=dataset_type,
-            data_root=dataset_root,
-            depth_root=os.path.join(video_path, "video_depth_anything"),
-            proportions=proportions,
-            queried_first=queried_first,
-            image_size=image_size,
-        )
+    dataset_x = TapVidDepthDavis(
+        dataset_type=dataset_type,
+        data_root=dataset_root,
+        depth_root=get_depth_root_from_data_root(dataset_root) \
+            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+        proportions=proportions,
+        queried_first=queried_first,
+        image_size=image_size,
+    )
                 
     dataloader_x = DataLoader(
         dataset_x,
@@ -248,12 +239,14 @@ def eval_cycle(model, model_name, mode, data_root, video_path, proportions, imag
             model_name, global_step, max_iters, iter_rtime, iter_itime,
             pools_x['d_avg'].mean(), pools_x['survival'].mean(), pools_x['median_l2'].mean()))
         
-    with open(os.path.join(log_dir, 'metrics.json'), 'w') as f:
-        json.dump({'d_avg': pools_x['d_avg'].mean(), 'survival': pools_x['survival'].mean(), 'median_l2': pools_x['median_l2'].mean()}, f)
+    # with open(os.path.join(log_dir, 'metrics.json'), 'w') as f:
+    #     json.dump({'d_avg': pools_x['d_avg'].mean(), 'survival': pools_x['survival'].mean(), 'median_l2': pools_x['median_l2'].mean()}, f)
             
     writer_x.close()
-    return pools_x['d_avg'].mean()
-
+    return {
+        "average_pts_within_thresh": pools_x['d_avg'].mean()
+    }
+    
 def main(
         B=1, # batchsize 
         S=128, # seqlen
@@ -303,10 +296,17 @@ def main(
     _ = saverloader.load(init_dir, model.module)
     model.eval()
 
+    os.makedirs(log_dir, exist_ok=True)
+    output_file = os.path.join(log_dir, f"evaluation_results.txt")
+    
     if exp_type == 'sketch':
-        eval_cycle(model, model_name, mode, data_root, data_root, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir)
+        score = eval_cycle(model, model_name, mode, data_root, data_root, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir)
+
+        with open(output_file, "w") as f:
+            for key, score in score.items():
+                f.write(f"{key}: {score}\n")
+    
     elif exp_type == 'perturbed':
-        output_file = "evaluation_results.txt"
         total = {}
         pert_sev_results = {}  # New dictionary for storing perturbation-severity pairs
         pert_root = os.path.join(data_root, "perturbations")
@@ -322,16 +322,20 @@ def main(
 
                 # Store results for perturbation-severity pair
                 key = f"{perturbation}-severity_{severity}"
-                pert_sev_results[key] = score
+                pert_sev_results[key] = {
+                    'average_pts_within_thresh': score['average_pts_within_thresh']
+                }
 
-                print(f"Processed {key}")
+                # print(f"Processed {key}")
 
                 # Aggregate per perturbation
-                total.setdefault(perturbation, []).append(score)
+                total.setdefault(perturbation, []).append(score['average_pts_within_thresh'])
 
         # Compute final per-perturbation averages
         perturbation_avg = {
-            perturbation: np.mean(total[perturbation])
+            perturbation: {
+                'average_pts_within_thresh': np.mean(total[perturbation])
+            }
             for perturbation in total
         }
 
@@ -342,21 +346,26 @@ def main(
 
         # Save results to a file
         with open(output_file, "w") as f:
+            # Summary of all perturbations
+            f.write("Summary of all perturbations\n")
+            for metric, scores in results.items():
+                f.write(f"all-{metric}: {scores}\n")
+            f.write("\n")
+            
+            # Summary of all perturbation-severity pairs
+            f.write("Summary of all perturbation-severity pairs\n")
+            for perturbation in perturbation_avg.keys():
+                # f.write(f"{perturbation}\n")
+                for metric, score in perturbation_avg[perturbation].items():
+                    f.write(f"{perturbation}-{metric}: {score}\n")
+            f.write("\n")
+                    
             # Write perturbation-severity pair results
-            f.write("Results for each perturbation-severity pair:\n")
-            for key, scores in pert_sev_results.items():
-                f.write(f"{key}: {scores}\n")
-
-
-        # Print final per-perturbation averages
-        print("\nAverage Results for each perturbation:")
-        for perturbation, scores in perturbation_avg.items():
-            print(f"{perturbation}: {scores}")
-
-        # Print final overall results
-        print("\nFinal Results:")
-        for metric, score in results.items():
-            print(f"{metric}: {score:.4f}")   
+            f.write("Results for each perturbation-severity pair\n")
+            for each_perturbation in pert_sev_results.keys():
+                for metric, score in pert_sev_results[each_perturbation].items():
+                    f.write(f"{each_perturbation}-{metric}: {score}\n")
+            f.write("\n")  
             
 if __name__ == '__main__':
     args = parse_args()

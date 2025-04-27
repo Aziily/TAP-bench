@@ -505,7 +505,8 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
         if self.dataset_type == "davis":
             self.video_names = list(self.points_dataset.keys())
         elif self.dataset_type == "stacking":
-            self.video_names = [f"video_{i:04d}" for i in range(len(self.points_dataset))]
+            # self.video_names = [f"video_{i:04d}" for i in range(len(self.points_dataset))]
+            self.video_names = [f"{i:04d}" for i in range(len(self.points_dataset))]
         
         print("found %d unique videos in %s" % (len(self.points_dataset), data_root))
 
@@ -726,12 +727,12 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
         return len(self.points_dataset)
         
 
-def build_tapvid(video_path, image_set, args):
+def build_tapvid(video_path, mode, args):
     
     from pathlib import Path
     sys.path.append(str(Path(__file__).parent.parent))
     from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
-    exp_type, set_type = image_set.split('_')[0], '_'.join(image_set.split('_')[1:])
+    exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
     
     root = Path(args.data_root)
     
@@ -746,30 +747,18 @@ def build_tapvid(video_path, image_set, args):
     transforms            = make_temporal_transforms("val", fix_size=args.fix_size, strong_aug=False, args=args)
     align_corners = getattr(args, "resize_align_corners", False)
 
-    if exp_type == 'sketch':
-        dataset = TapVidDepthDataset(
-            dataset_root,
-            depth_root=get_depth_root_from_data_root(dataset_root),
-            dataset_type=dataset_type,
-            resize_to_256=True,
-            queried_first=queried_first,
-            transforms=transforms, 
-            aux_target_hacks=aux_target_hacks_list,
-            num_queries_per_video=args.num_queries_per_video_eval,
-            align_corners=align_corners,
-            proportions=args.proportions,
-        )
-    elif exp_type == 'perturbed':
-        dataset = TapVidDepthDataset(
-            dataset_root,
-            depth_root=os.path.join(video_path, "video_depth_anything"),
-            dataset_type=dataset_type,
-            resize_to_256=True,
-            queried_first=queried_first,
-            transforms=transforms, 
-            aux_target_hacks=aux_target_hacks_list,
-            num_queries_per_video=args.num_queries_per_video_eval,
-            align_corners=align_corners,
-            proportions=args.proportions,
-        )
+    dataset = TapVidDepthDataset(
+        dataset_root,
+        depth_root=get_depth_root_from_data_root(dataset_root) \
+            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+        dataset_type=dataset_type,
+        resize_to_256=True,
+        queried_first=queried_first,
+        transforms=transforms, 
+        aux_target_hacks=aux_target_hacks_list,
+        num_queries_per_video=args.num_queries_per_video_eval,
+        align_corners=align_corners,
+        proportions=args.proportions,
+    )
+
     return dataset
