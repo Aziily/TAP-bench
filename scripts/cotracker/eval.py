@@ -188,6 +188,44 @@ def run_eval(cfg: DefaultConfig):
         with open(output_file, "w") as f:
             for key, score in score.items():
                 f.write(f"{key}: {score}\n")
+    
+    elif exp_type == 'realworld':
+        curr_collate_fn = collate_fn
+        from mydataset import RealWorldDataset
+        test_dataset = RealWorldDataset(
+            data_root=cfg.data_root,
+            proportions=cfg.proportions,
+            resize_to=[256, 256]
+        ) 
+
+        # Creating the DataLoader object
+        test_dataloader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=1,
+            collate_fn=curr_collate_fn,
+        )
+
+        # Timing and conducting the evaluation
+        import time
+
+        start = time.time()
+        # log_file = os.path.join(cfg.exp_dir, f"result_eval_whole.json")
+        evaluate_result = evaluator.evaluate_sequence(
+            predictor, test_dataloader, dataset_name=cfg.mode
+        )
+        end = time.time()
+        print(end - start)
+
+        # Saving the evaluation results to a .json file
+        evaluate_result = evaluate_result["avg"]
+        print("evaluate_result", evaluate_result)
+        evaluate_result["time"] = end - start
+        
+        with open(output_file, "w") as f:
+            for key, score in evaluate_result.items():
+                f.write(f"{key}: {score}\n")
         
     elif exp_type == 'perturbed':
         total_oa = {}

@@ -239,12 +239,12 @@ def create_depth_dataset(
     to_iterate = range(len(points_dataset))
 
     for index in to_iterate:
-        if dataset_type in ["davis", "stacking"]:
+        if dataset_type in ["davis", "stacking", "robotap"]:
             video_name = video_names[index]
         else:
             video_name = index
             
-        if dataset_type == "davis":
+        if dataset_type in ["davis", "robotap"]:
             video_index = video_name
         else:
             video_index = index
