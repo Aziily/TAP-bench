@@ -360,3 +360,139 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         if self.dataset_type == "kinetics":
             return 1071
         return len(self.points_dataset)
+    
+def load_queries_strided_from_npz(
+    queries_xyt: np.ndarray,
+    tracks_xy: np.ndarray,
+    visibles: np.ndarray,
+    frames: np.ndarray,
+) -> Mapping[str, np.ndarray]:
+    """Loads query and track data from pre-sampled strided format in npz.
+
+    Args:
+      queries_xyt: [n_queries, 3], with [x, y, t] in pixel coordinates.
+      tracks_xy: [n_frames, n_queries, 2], with [x, y] in pixel coordinates.
+      visibles: [n_frames, n_queries] boolean indicating visibility.
+      frames: [n_frames, H, W, 3] float32 array scaled to [-1, 1].
+
+    Returns:
+      A dict similar to the one returned by `sample_queries_strided`.
+    """
+    n_frames, H, W, _ = frames.shape
+    n_queries = queries_xyt.shape[0]
+
+    # Normalize coordinates to [-1, 1]
+    query_points = np.stack([
+        # (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
+        # (queries_xyt[:, 1] / (H - 1)) * 2 - 1,         # y in [-1, 1]
+        # (queries_xyt[:, 0] / (W - 1)) * 2 - 1,         # x in [-1, 1]
+        queries_xyt[:, 2],
+        queries_xyt[:, 1],
+        queries_xyt[:, 0],
+    ], axis=-1)
+
+    norm_tracks = tracks_xy.copy()
+    # norm_tracks[..., 0] = (norm_tracks[..., 0] / (W - 1)) * 2 - 1
+    # norm_tracks[..., 1] = (norm_tracks[..., 1] / (H - 1)) * 2 - 1
+    
+    return {
+        "video": frames[np.newaxis, ...],
+        "query_points": query_points[np.newaxis, ...],
+        "target_points": np.transpose(norm_tracks, (1, 0, 2))[np.newaxis, ...],
+        "occluded": np.logical_not(visibles.T)[np.newaxis, ...],  # [1, N, T]
+        "trackgroup": np.arange(n_queries)[np.newaxis, ...],
+    }
+
+def resize_video(video: np.ndarray, output_size: tuple) -> np.ndarray:
+    """Resizes a video to the given output size.
+    
+    Args:
+        video: [T, H, W, C] float32 array.
+        output_size: (height, width) tuple.
+    
+    Returns:
+        A video with the given output size, same dtype as input.
+    """
+    T, H, W, C = video.shape
+    target_h, target_w = output_size
+    resized_video = np.zeros((T, target_h, target_w, C), dtype=video.dtype)
+
+    for t in range(T):
+        frame = video[t]
+        resized_frame = cv2.resize(frame, (target_w, target_h))  # 注意顺序是 (width, height)
+        resized_video[t] = resized_frame
+
+    return resized_video
+
+class RealWorldDataset(torch.utils.data.Dataset):
+    def __init__(self, data_root, proportions, resize_to=(256, 256)):
+        self.data_root = data_root
+        depth_root = os.path.join(data_root, "video_depth_anything")
+        self.resize_to = resize_to
+        self.video_paths = sorted(glob.glob(os.path.join(data_root, "*.npz")))
+        print(f"Found {len(self.video_paths)} video files in {data_root}")
+        self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+        self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
+        self.proportions = proportions
+        
+    def __len__(self):
+        return len(self.video_paths)
+
+    def __getitem__(self, index):
+        path = self.video_paths[index]
+        with open(path, "rb") as f:
+            data = np.load(f, allow_pickle=True)
+            images_jpeg_bytes = data["images_jpeg_bytes"]
+            queries_xyt = data["queries_xyt"]
+            tracks_xy = data["tracks_XY"]
+            visibles = data["visibility"]
+            # intrinsics_params = data["fx_fy_cx_cy"]  # Optional
+
+        # Decode frames
+        frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in images_jpeg_bytes])
+        video_name = os.path.splitext(os.path.basename(path))[0]
+        # frames = self.video_dataset[video_name]
+        depth_frames = self.depth_dataset[video_name]
+        
+        # 如果frame尺寸和depth_frame尺寸不一样，resize到depth_frame尺寸
+        if frames.shape[1:3] != depth_frames.shape[1:3]:
+            H, W = depth_frames.shape[1:3]
+            scale_w = (W - 1) / (frames.shape[2] - 1)
+            scale_h = (H - 1) / (frames.shape[1] - 1)
+            queries_xyt[:, 0] *= scale_w
+            queries_xyt[:, 1] *= scale_h
+            tracks_xy[..., 0] *= scale_w
+            tracks_xy[..., 1] *= scale_h
+            
+            frames = resize_video(frames, (H, W))
+        
+        a, b, c = self.proportions
+        frames = np.stack([
+            a * depth_frames[:, :, :, 0] + (1 - a) * frames[:, :, :, 0],  # First channel blend
+            b * depth_frames[:, :, :, 0] + (1 - b) * frames[:, :, :, 1],  # Second channel blend
+            c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2]   # Third channel blend
+        ], axis=3)  # Stack along the channel dimension
+        
+        frames = frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+        depth_frames = depth_frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+
+        # Load and normalize
+        converted = load_queries_strided_from_npz(queries_xyt, tracks_xy, visibles, frames)
+        assert converted["target_points"].shape[1] == converted["query_points"].shape[1]
+
+        rgbs = torch.from_numpy(frames).permute(0, 3, 1, 2).float()
+        trajs = (
+            torch.from_numpy(converted["target_points"])[0].permute(1, 0, 2).float()
+        )  # T, N, 2
+        visibles = torch.logical_not(torch.from_numpy(converted["occluded"])[0]).permute(1, 0)  # T, N
+        query_points = torch.from_numpy(converted["query_points"])[0]
+
+        sample = {
+            'rgbs': rgbs,
+            'trajs': trajs,
+            'valids': visibles,
+            'visibs': visibles,
+            'query_points': query_points,
+        }
+
+        return sample

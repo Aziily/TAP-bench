@@ -62,25 +62,8 @@ for env_pair in "${ENV_PAIRS[@]}"; do
         METHOD_LIST="$METHOD_LIST $DIR_NAME"
     fi
 
-    cd $DIR_NAME
-
-    bash run.bash \
-        "$EXPTYPE" \
-        "$DATASET" \
-        "$DATAROOT" \
-        "$PROPORTIONS" \
-        "$EXP_NAME" \
-        "$CONDA_ENV_PATH/$ENV_NAME/bin/python" \
-        "$CUDA_ID" > "../$EXECUTE_LOG_DIR/$DIR_NAME.log" 2>&1
-
-    cd ..
 done
 
-echo $SPLITER
-echo "Finished running all methods, begin to compose the results"
-echo $SPLITER
-
-$BASE_PATH/pip install prettytable pandas natsort
 $BASE_PATH/python compose.py \
     --save_dir $RES_DIR \
     --methods $METHOD_LIST \

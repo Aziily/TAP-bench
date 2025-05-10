@@ -726,6 +726,172 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
             return 1071
         return len(self.points_dataset)
         
+def load_queries_strided_from_npz(
+    queries_xyt: np.ndarray,
+    tracks_xy: np.ndarray,
+    visibles: np.ndarray,
+    frames: np.ndarray,
+) -> Mapping[str, np.ndarray]:
+    """Loads query and track data from pre-sampled strided format in npz.
+
+    Args:
+      queries_xyt: [n_queries, 3], with [x, y, t] in pixel coordinates.
+      tracks_xy: [n_frames, n_queries, 2], with [x, y] in pixel coordinates.
+      visibles: [n_frames, n_queries] boolean indicating visibility.
+      frames: [n_frames, H, W, 3] float32 array scaled to [-1, 1].
+
+    Returns:
+      A dict similar to the one returned by `sample_queries_strided`.
+    """
+    n_frames, H, W, _ = frames.shape
+    n_queries = queries_xyt.shape[0]
+
+    # Normalize coordinates to [-1, 1]
+    query_points = np.stack([
+        # (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
+        # (queries_xyt[:, 1] / (H - 1)) * 2 - 1,         # y in [-1, 1]
+        # (queries_xyt[:, 0] / (W - 1)) * 2 - 1,         # x in [-1, 1]
+        queries_xyt[:, 2],
+        queries_xyt[:, 1],
+        queries_xyt[:, 0],
+    ], axis=-1)
+
+    norm_tracks = tracks_xy.copy()
+    # norm_tracks[..., 0] = (norm_tracks[..., 0] / (W - 1)) * 2 - 1
+    # norm_tracks[..., 1] = (norm_tracks[..., 1] / (H - 1)) * 2 - 1
+    
+    return {
+        "video": frames[np.newaxis, ...],
+        "query_points": query_points[np.newaxis, ...],
+        "target_points": np.transpose(norm_tracks, (1, 0, 2))[np.newaxis, ...],
+        "occluded": np.logical_not(visibles.T)[np.newaxis, ...],  # [1, N, T]
+        "trackgroup": np.arange(n_queries)[np.newaxis, ...],
+    }
+
+class RealWorldDataset(torch.utils.data.Dataset):
+    def __init__(self, data_root, proportions, resize_to_256=True):
+        self.data_root = data_root
+        depth_root = os.path.join(data_root, "video_depth_anything")
+        self.resize_to_256 = resize_to_256
+        self.video_paths = sorted(glob.glob(os.path.join(data_root, "*.npz")))
+        print(f"Found {len(self.video_paths)} video files in {data_root}")
+        self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+        self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
+        self.proportions = proportions
+    
+    def __getitem__(self, index):
+        path = self.video_paths[index]
+        with open(path, "rb") as f:
+            data = np.load(f, allow_pickle=True)
+            images_jpeg_bytes = data["images_jpeg_bytes"]
+            queries_xyt = data["queries_xyt"]
+            tracks_xy = data["tracks_XY"]
+            visibles = data["visibility"]
+            # intrinsics_params = data["fx_fy_cx_cy"]  # Optional
+
+        # Decode frames
+        frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in images_jpeg_bytes])
+        video_name = os.path.splitext(os.path.basename(path))[0]
+        # frames = self.video_dataset[video_name]
+        depth_frames = self.depth_dataset[video_name]
+        
+        # 如果frame尺寸和depth_frame尺寸不一样，resize到depth_frame尺寸
+        if frames.shape[1:3] != depth_frames.shape[1:3]:
+            H, W = depth_frames.shape[1:3]
+            scale_w = (W - 1) / (frames.shape[2] - 1)
+            scale_h = (H - 1) / (frames.shape[1] - 1)
+            queries_xyt[:, 0] *= scale_w
+            queries_xyt[:, 1] *= scale_h
+            tracks_xy[..., 0] *= scale_w
+            tracks_xy[..., 1] *= scale_h
+            
+            frames = resize_video(frames, (H, W))
+        
+        a, b, c = self.proportions
+        frames = np.stack([
+            a * depth_frames[:, :, :, 0] + (1 - a) * frames[:, :, :, 0],  # First channel blend
+            b * depth_frames[:, :, :, 0] + (1 - b) * frames[:, :, :, 1],  # Second channel blend
+            c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2]   # Third channel blend
+        ], axis=3)  # Stack along the channel dimension
+        
+        frames = frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+        depth_frames = depth_frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+
+        # Load and normalize
+        converted = load_queries_strided_from_npz(queries_xyt, tracks_xy, visibles, frames)
+        assert converted["target_points"].shape[1] == converted["query_points"].shape[1]
+        
+        aligned_data_list = []
+        aligned_inv_data_list = []
+
+        num_points, num_frames = converted["occluded"][0].shape
+        tracking_mask = torch.ones([num_points, num_frames]) > 0
+        tracking_mask_inv = torch.ones([num_points, num_frames]) > 0
+        first_emerge_frames = converted["query_points"][0, :, 0]
+        for p_id in range(num_points):
+            tracking_mask[p_id, : int(first_emerge_frames[p_id])] = False
+            tracking_mask_inv[p_id, int(first_emerge_frames[p_id]+1):] = False
+        targets ={
+            "points": torch.from_numpy(converted["target_points"])[0].float(),
+            'occluded': torch.from_numpy(converted["occluded"][0]), 
+            'num_frames': num_frames, 
+            'sampled_frame_ids': torch.arange(num_frames), 
+            'tracking_mask': tracking_mask,
+            'query_frames': torch.IntTensor(converted["query_points"][0, :, 0]),
+            'sampled_point_ids': torch.arange(num_points),
+            "num_real_pt": torch.tensor([num_points]),
+            'seq_name': str(video_name) + f"_stride",
+        }
+        frames = torch.FloatTensor(frames)
+        frames_inv = frames.flip(0)
+        depth_frames = torch.FloatTensor(frames)
+        depth_frames_inv = depth_frames.flip(0)
+        targets_inv ={
+            "points": torch.from_numpy(converted["target_points"])[0].float().flip(1),
+            'occluded': torch.from_numpy(converted["occluded"][0]).flip(1), 
+            'num_frames': num_frames, 
+            'sampled_frame_ids': torch.arange(num_frames), 
+            'tracking_mask': tracking_mask_inv.flip(1),
+            'query_frames': num_frames - torch.IntTensor(converted["query_points"][0, :, 0]) - 1,
+            'sampled_point_ids': torch.arange(num_points),
+            "num_real_pt": torch.tensor([num_points]),
+            'seq_name': str(video_name) + f"_stride_inv",
+        }
+        aligned_data_list.append(self.align_format(frames.permute(0, 3, 1, 2) / 255.0, torch.FloatTensor(depth_frames).permute(0, 3, 1, 2) / 255.0, targets))
+        aligned_inv_data_list.append(self.align_format(frames_inv.permute(0, 3, 1, 2) / 255.0, torch.FloatTensor(depth_frames_inv).permute(0, 3, 1, 2) / 255.0, targets_inv))
+        return aligned_data_list, aligned_inv_data_list
+
+    def align_format(self, images, depths, targets):
+        if self.transforms is not None:
+            images, targets = self.transforms(images, targets)
+            depths, _ = self.transforms(depths.expand(-1, 3, -1, -1), None)
+
+        # convert to needed format
+        if self.aux_target_hacks is not None:
+            for hack_runner in self.aux_target_hacks:
+                targets, images = hack_runner(targets, img=images)
+        seq_name = targets.pop("seq_name")
+        targets = {
+            "pt_boxes": targets.pop("boxes"),
+            "pt_labels": targets.pop("labels"),
+            "pt_tracking_mask": targets.pop("tracking_mask"),
+            "num_real_pt": targets.pop("num_real_pt"),
+            "query_frames": targets.pop("query_frames"),
+        }
+        
+        a, b, c = self.proportions
+        samples = torch.stack([
+            a * depths[:, 0] + (1 - a) * images[:, 0],
+            b * depths[:, 1] + (1 - b) * images[:, 1],
+            c * depths[:, 2] + (1 - c) * images[:, 2],
+        ], dim=1)
+        
+        return samples, targets, seq_name
+    
+    def __len__(self):
+        if self.dataset_type == "kinetics":
+            return 1071
+        return len(self.points_dataset)
 
 def build_tapvid(video_path, mode, args):
     
@@ -736,29 +902,38 @@ def build_tapvid(video_path, mode, args):
     
     root = Path(args.data_root)
     
-    if exp_type == 'sketch':
-        PATHS = get_sketch_data_path(root)
-    elif exp_type == 'perturbed':
-        PATHS = get_perturbed_data_path(root)
+    if exp_type == 'realworld':
+        dataset  = RealWorldDataset(
+            video_path,
+            proportions=args.proportions,
+            resize_to_256=True,
+        )
         
-    dataset_type, dataset_root, queried_first = PATHS[set_type]
-    # add some hooks to datasets
-    aux_target_hacks_list = get_aux_target_hacks_list("val", args)
-    transforms            = make_temporal_transforms("val", fix_size=args.fix_size, strong_aug=False, args=args)
-    align_corners = getattr(args, "resize_align_corners", False)
+    else:
+    
+        if exp_type == 'sketch':
+            PATHS = get_sketch_data_path(root)
+        elif exp_type == 'perturbed':
+            PATHS = get_perturbed_data_path(root)
+            
+        dataset_type, dataset_root, queried_first = PATHS[set_type]
+        # add some hooks to datasets
+        aux_target_hacks_list = get_aux_target_hacks_list("val", args)
+        transforms            = make_temporal_transforms("val", fix_size=args.fix_size, strong_aug=False, args=args)
+        align_corners = getattr(args, "resize_align_corners", False)
 
-    dataset = TapVidDepthDataset(
-        dataset_root,
-        depth_root=get_depth_root_from_data_root(dataset_root) \
-            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
-        dataset_type=dataset_type,
-        resize_to_256=True,
-        queried_first=queried_first,
-        transforms=transforms, 
-        aux_target_hacks=aux_target_hacks_list,
-        num_queries_per_video=args.num_queries_per_video_eval,
-        align_corners=align_corners,
-        proportions=args.proportions,
-    )
+        dataset = TapVidDepthDataset(
+            dataset_root,
+            depth_root=get_depth_root_from_data_root(dataset_root) \
+                if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+            dataset_type=dataset_type,
+            resize_to_256=True,
+            queried_first=queried_first,
+            transforms=transforms, 
+            aux_target_hacks=aux_target_hacks_list,
+            num_queries_per_video=args.num_queries_per_video_eval,
+            align_corners=align_corners,
+            proportions=args.proportions,
+        )
 
     return dataset

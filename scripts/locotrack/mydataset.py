@@ -294,6 +294,121 @@ def create_depth_dataset(
 
         yield {'depth': converted}
     
+def load_queries_strided_from_npz(
+    queries_xyt: np.ndarray,
+    tracks_xy: np.ndarray,
+    visibles: np.ndarray,
+    frames: np.ndarray,
+) -> Mapping[str, np.ndarray]:
+    """Loads query and track data from pre-sampled strided format in npz.
+
+    Args:
+      queries_xyt: [n_queries, 3], with [x, y, t] in pixel coordinates.
+      tracks_xy: [n_frames, n_queries, 2], with [x, y] in pixel coordinates.
+      visibles: [n_frames, n_queries] boolean indicating visibility.
+      frames: [n_frames, H, W, 3] float32 array scaled to [-1, 1].
+
+    Returns:
+      A dict similar to the one returned by `sample_queries_strided`.
+    """
+    n_frames, H, W, _ = frames.shape
+    n_queries = queries_xyt.shape[0]
+
+    # Normalize coordinates to [-1, 1]
+    query_points = np.stack([
+        # (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
+        # (queries_xyt[:, 1] / (H - 1)) * 2 - 1,         # y in [-1, 1]
+        # (queries_xyt[:, 0] / (W - 1)) * 2 - 1,         # x in [-1, 1]
+        queries_xyt[:, 2],
+        queries_xyt[:, 1],
+        queries_xyt[:, 0],
+    ], axis=-1)
+
+    norm_tracks = tracks_xy.copy()
+    # norm_tracks[..., 0] = (norm_tracks[..., 0] / (W - 1)) * 2 - 1
+    # norm_tracks[..., 1] = (norm_tracks[..., 1] / (H - 1)) * 2 - 1
+    
+    return {
+        "video": frames[np.newaxis, ...],
+        "query_points": query_points[np.newaxis, ...],
+        "target_points": np.transpose(norm_tracks, (1, 0, 2))[np.newaxis, ...],
+        "occluded": np.logical_not(visibles.T)[np.newaxis, ...],  # [1, N, T]
+        "trackgroup": np.arange(n_queries)[np.newaxis, ...],
+    }
+    
+def create_real_dataset(
+    data_root,
+    proportions,
+    resolution=[256, 256],
+):
+    depth_root = os.path.join(data_root, "video_depth_anything")
+    video_paths = sorted(glob.glob(os.path.join(data_root, "*.npz")))
+    print(f"Found {len(video_paths)} video files in {data_root}")
+    video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+    depth_dataset = read_videos(depth_root, "*_vis.mp4")
+        
+    print("found %d unique videos in %s" % (len(video_paths), data_root))
+    
+    to_iterate = range(len(video_paths))
+
+    for index in to_iterate:
+        path = video_paths[index]
+        with open(path, "rb") as f:
+            data = np.load(f, allow_pickle=True)
+            images_jpeg_bytes = data["images_jpeg_bytes"]
+            queries_xyt = data["queries_xyt"]
+            tracks_xy = data["tracks_XY"]
+            visibles = data["visibility"]
+            # intrinsics_params = data["fx_fy_cx_cy"]  # Optional
+
+        # Decode frames
+        frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in images_jpeg_bytes])
+        video_name = os.path.splitext(os.path.basename(path))[0]
+        # frames = video_dataset[video_name]
+        depth_frames = depth_dataset[video_name]
+
+        if isinstance(frames[0], bytes):
+            # TAP-Vid is stored and JPEG bytes rather than `np.ndarray`s.
+            def decode(frame):
+                byteio = io.BytesIO(frame)
+                img = Image.open(byteio)
+                return np.array(img)
+
+            frames = np.array([decode(frame) for frame in frames])
+        if isinstance(depth_frames[0], bytes):
+            # TAP-Vid is stored and JPEG bytes rather than `np.ndarray`s.
+            def decode(frame):
+                byteio = io.BytesIO(frame)
+                img = Image.open(byteio)
+                return np.array(img)
+
+            depth_frames = np.array([decode(frame) for frame in depth_frames])
+        
+        if resolution is not None and resolution != frames.shape[1:3]:
+            H, W = resolution
+            # Rescale the tracks and queries
+            scale_w = (W - 1) / (frames.shape[2] - 1)
+            scale_h = (H - 1) / (frames.shape[1] - 1)
+            queries_xyt[:, 0] *= scale_w
+            queries_xyt[:, 1] *= scale_h
+            tracks_xy[..., 0] *= scale_w
+            tracks_xy[..., 1] *= scale_h
+            frames = resize_video(frames, resolution)
+            depth_frames = resize_video(depth_frames, resolution)
+
+        a, b, c = proportions
+        frames = np.stack([
+            a * depth_frames[:, :, :, 0] + (1 - a) * frames[:, :, :, 0],  # First channel blend
+            b * depth_frames[:, :, :, 0] + (1 - b) * frames[:, :, :, 1],  # Second channel blend
+            c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2]   # Third channel blend
+        ], axis=3)
+        
+        frames = frames.astype(np.float32) / 255.0 * 2.0 - 1.0
+        converted = load_queries_strided_from_npz(queries_xyt, tracks_xy, visibles, frames)
+        assert converted["target_points"].shape[1] == converted["query_points"].shape[1]
+
+        yield {'depth': converted}
+    
 def get_eval_dataset(mode, path, video_path, resolution=(256, 256), proportions=[0.0, 0.0, 0.0]):
     datasets = {}
     
@@ -302,22 +417,25 @@ def get_eval_dataset(mode, path, video_path, resolution=(256, 256), proportions=
     from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
     exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
     
-    if exp_type == 'sketch':
-        PATHS = get_sketch_data_path(path)
-    elif exp_type == 'perturbed':
-        PATHS = get_perturbed_data_path(path)
+    if exp_type == 'realworld':
+        dataset = create_real_dataset(path, proportions, resolution)
+    else:
+        if exp_type == 'sketch':
+            PATHS = get_sketch_data_path(path)
+        elif exp_type == 'perturbed':
+            PATHS = get_perturbed_data_path(path)
+            
+        dataset_type, dataset_root, queried_first = PATHS[set_type]
         
-    dataset_type, dataset_root, queried_first = PATHS[set_type]
-    
-    dataset = create_depth_dataset(
-        data_root=dataset_root,
-        depth_root=get_depth_root_from_data_root(dataset_root) \
-            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
-        proportions=proportions,
-        dataset_type=dataset_type,
-        resolution=resolution,
-        query_mode='first' if queried_first else 'strided',
-    )
+        dataset = create_depth_dataset(
+            data_root=dataset_root,
+            depth_root=get_depth_root_from_data_root(dataset_root) \
+                if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+            proportions=proportions,
+            dataset_type=dataset_type,
+            resolution=resolution,
+            query_mode='first' if queried_first else 'strided',
+        )
     datasets[set_type] = CustomDataset(dataset, 'depth')
 
     if len(datasets) == 0:

@@ -26,6 +26,7 @@ METHOD_LIST = {
     "taptr": "taptr",
     "bootstapir": "tapnet",
     "tapir": "tapnet",
+    "tapnext": "tapnext",
 }
 
 ALL_CASES = [
@@ -86,7 +87,7 @@ def summarize_one(method, save_dir, exp_name, exp_type):
     exp_file = os.path.join(exp_dir, "evaluation_results.txt")
     shutil.copyfile(exp_file, os.path.join(save_dir, f"{method}_eval.txt"))
     
-    if exp_type == "sketch":
+    if exp_type == "sketch" or args.exp_type == "realworld":
         
         res = {
             "occlusion_accuracy": None,
@@ -148,9 +149,9 @@ def del_data(data):
 def summarize(args):
     os.makedirs(args.save_dir, exist_ok=True)
     
-    assert args.exp_type in ["sketch", "perturbed"]
+    assert args.exp_type in ["sketch", "perturbed", "realworld"]
     
-    if args.exp_type == "sketch":
+    if args.exp_type == "sketch" or args.exp_type == "realworld":
         table = prettytable.PrettyTable()
         table.title = f"{args.identifier} Summary"
         table.field_names = ["Method", "occlusion_accuracy", "average_jaccard", "average_pts_within_thresh"]
@@ -159,6 +160,7 @@ def summarize(args):
         
         for method in args.methods:
             data = summarize_one(method, args.save_dir, args.exp_name, args.exp_type)
+            print(data)
             row = [method, del_data(data["occlusion_accuracy"]), del_data(data["average_jaccard"]), del_data(data["average_pts_within_thresh"])]
             table.add_row(row, divider=True)
         

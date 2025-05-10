@@ -177,23 +177,27 @@ def eval_cycle(model, model_name, mode, data_root, video_path, proportions, imag
     from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
     exp_type, set_type = mode.split('_')[0], '_'.join(mode.split('_')[1:])
     
-    if exp_type == 'sketch':
-        PATHS = get_sketch_data_path(data_root)
-    elif exp_type == 'perturbed':
-        PATHS = get_perturbed_data_path(data_root)
+    if exp_type == 'realworld':
+        from mydataset import RealWorldDataset
+        dataset_x = RealWorldDataset(data_root, proportions, image_size)
+    else:
+        if exp_type == 'sketch':
+            PATHS = get_sketch_data_path(data_root)
+        elif exp_type == 'perturbed':
+            PATHS = get_perturbed_data_path(data_root)
+            
+        dataset_type, dataset_root, queried_first = PATHS[set_type]
+        print('loading %s dataset...' % dataset_type, dataset_root, "proportions", proportions, "image_size", image_size)
         
-    dataset_type, dataset_root, queried_first = PATHS[set_type]
-    print('loading %s dataset...' % dataset_type, dataset_root, "proportions", proportions, "image_size", image_size)
-    
-    dataset_x = TapVidDepthDavis(
-        dataset_type=dataset_type,
-        data_root=dataset_root,
-        depth_root=get_depth_root_from_data_root(dataset_root) \
-            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
-        proportions=proportions,
-        queried_first=queried_first,
-        image_size=image_size,
-    )
+        dataset_x = TapVidDepthDavis(
+            dataset_type=dataset_type,
+            data_root=dataset_root,
+            depth_root=get_depth_root_from_data_root(dataset_root) \
+                if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+            proportions=proportions,
+            queried_first=queried_first,
+            image_size=image_size,
+        )
                 
     dataloader_x = DataLoader(
         dataset_x,
@@ -299,11 +303,11 @@ def main(
     os.makedirs(log_dir, exist_ok=True)
     output_file = os.path.join(log_dir, f"evaluation_results.txt")
     
-    if exp_type == 'sketch':
-        score = eval_cycle(model, model_name, mode, data_root, data_root, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir)
+    if exp_type == 'sketch' or exp_type == 'realworld':
+        scores = eval_cycle(model, model_name, mode, data_root, data_root, proportions, image_size, shuffle, n_pool, log_freq, max_iters, iters, S, log_dir)
 
         with open(output_file, "w") as f:
-            for key, score in score.items():
+            for key, score in scores.items():
                 f.write(f"{key}: {score}\n")
     
     elif exp_type == 'perturbed':

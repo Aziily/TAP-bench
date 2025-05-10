@@ -620,14 +620,17 @@ def load_queries_strided_from_npz(
 
     # Normalize coordinates to [-1, 1]
     query_points = np.stack([
-        (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
-        (queries_xyt[:, 1] / (H - 1)) * 2 - 1,         # y in [-1, 1]
-        (queries_xyt[:, 0] / (W - 1)) * 2 - 1,         # x in [-1, 1]
+        # (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
+        # (queries_xyt[:, 1] / (H - 1)) * 2 - 1,         # y in [-1, 1]
+        # (queries_xyt[:, 0] / (W - 1)) * 2 - 1,         # x in [-1, 1]
+        queries_xyt[:, 2],
+        queries_xyt[:, 1],
+        queries_xyt[:, 0],
     ], axis=-1)
 
     norm_tracks = tracks_xy.copy()
-    norm_tracks[..., 0] = (norm_tracks[..., 0] / (W - 1)) * 2 - 1
-    norm_tracks[..., 1] = (norm_tracks[..., 1] / (H - 1)) * 2 - 1
+    # norm_tracks[..., 0] = (norm_tracks[..., 0] / (W - 1)) * 2 - 1
+    # norm_tracks[..., 1] = (norm_tracks[..., 1] / (H - 1)) * 2 - 1
     
     return {
         "video": frames[np.newaxis, ...],
@@ -663,14 +666,12 @@ class RealWorldDataset(torch.utils.data.Dataset):
             # intrinsics_params = data["fx_fy_cx_cy"]  # Optional
 
         # Decode frames
-        # frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in images_jpeg_bytes])
+        frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in images_jpeg_bytes])
         video_name = os.path.splitext(os.path.basename(path))[0]
-        frames = self.video_dataset[video_name]
+        # frames = self.video_dataset[video_name]
         depth_frames = self.depth_dataset[video_name]
 
         if self.resize_to is not None:
-            frames = resize_video(frames, self.resize_to)
-            depth_frames = resize_video(depth_frames, self.resize_to)
             H, W = self.resize_to
             # Rescale the tracks and queries
             scale_w = (W - 1) / (frames.shape[2] - 1)
@@ -679,6 +680,8 @@ class RealWorldDataset(torch.utils.data.Dataset):
             queries_xyt[:, 1] *= scale_h
             tracks_xy[..., 0] *= scale_w
             tracks_xy[..., 1] *= scale_h
+            frames = resize_video(frames, self.resize_to)
+            depth_frames = resize_video(depth_frames, self.resize_to)
 
         
         a, b, c = self.proportions
@@ -688,8 +691,8 @@ class RealWorldDataset(torch.utils.data.Dataset):
             c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2]   # Third channel blend
         ], axis=3)  # Stack along the channel dimension
         
-        frames = frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
-        depth_frames = depth_frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+        # frames = frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+        # depth_frames = depth_frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
 
         # Load and normalize
         converted = load_queries_strided_from_npz(queries_xyt, tracks_xy, visibles, frames)

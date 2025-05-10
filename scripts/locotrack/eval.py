@@ -199,11 +199,11 @@ def train(
     os.makedirs(save_path, exist_ok=True)
     output_file = os.path.join(save_path, f"evaluation_results.txt")
     
-    if exp_type == 'sketch':
-        score = eval_cycle(model, mode, val_dataset_path, val_dataset_path, image_size, proportions, logger, precision, ckpt_path)
+    if exp_type == 'sketch' or exp_type == 'realworld':
+        scores = eval_cycle(model, mode, val_dataset_path, val_dataset_path, image_size, proportions, logger, precision, ckpt_path)
     
         with open(output_file, "w") as f:
-            for key, score in score.items():
+            for key, score in scores.items():
                 f.write(f"{key}: {score}\n")
     
     elif exp_type == 'perturbed':

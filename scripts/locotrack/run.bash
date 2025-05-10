@@ -1,10 +1,14 @@
 # EXPTYPE="sketch"
 # DATASET="tapvid_rgb_stacking_first"
 # DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/sketch_tapvid_rgbs"
+# EXPTYPE="realworld"
+# DATASET="tapvid_realworld_strided"
+# DATAROOT="/mnt/nas/share/home/zzh/datasets/tap/drivetrack_2d"
 # PROPORTIONS="0.0 0.0 0.0"
 
 # EXP_NAME="locotrack_base"
 # PYTHON_PATH="python"
+# DEVICE_ID=3
 
 if [ $# -lt 6 ]; then
     echo "Usage: bash run.sh EXPTYPE DATASET DATAROOT PROPORTIONS EXP_NAME PYTHON_PATH"

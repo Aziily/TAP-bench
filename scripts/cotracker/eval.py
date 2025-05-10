@@ -75,24 +75,33 @@ def eval_cycle(video_path, evaluator, predictor, cfg: DefaultConfig):
     # Constructing the specified dataset
     curr_collate_fn = collate_fn
     exp_type, set_type = cfg.mode.split('_')[0], '_'.join(cfg.mode.split('_')[1:])
-    if exp_type == 'sketch':
-        PATHS = get_sketch_data_path(cfg.data_root)
-    elif exp_type == 'perturbed':
-        PATHS = get_perturbed_data_path(cfg.data_root)
+    
+    if exp_type == 'realworld':
+        from mydataset import RealWorldDataset
+        test_dataset = RealWorldDataset(
+            data_root=cfg.data_root,
+            proportions=cfg.proportions,
+            resize_to=[256, 256]
+        ) 
+    else:
+        if exp_type == 'sketch':
+            PATHS = get_sketch_data_path(cfg.data_root)
+        elif exp_type == 'perturbed':
+            PATHS = get_perturbed_data_path(cfg.data_root)
+            
+        dataset_type, dataset_root, queried_first = PATHS[set_type]
         
-    dataset_type, dataset_root, queried_first = PATHS[set_type]
-    
-    from mydataset import TapVidDepthDataset
-    
-    test_dataset = TapVidDepthDataset(
-        dataset_type=dataset_type,
-        data_root=dataset_root,
-        depth_root=get_depth_root_from_data_root(dataset_root) \
-            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
-        proportions=cfg.proportions,
-        queried_first=queried_first,
-        resize_to=[256, 256]
-    ) 
+        from mydataset import TapVidDepthDataset
+        
+        test_dataset = TapVidDepthDataset(
+            dataset_type=dataset_type,
+            data_root=dataset_root,
+            depth_root=get_depth_root_from_data_root(dataset_root) \
+                if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+            proportions=cfg.proportions,
+            queried_first=queried_first,
+            resize_to=[256, 256]
+        ) 
 
     # Creating the DataLoader object
     test_dataloader = torch.utils.data.DataLoader(
@@ -182,49 +191,11 @@ def run_eval(cfg: DefaultConfig):
     os.makedirs(cfg.exp_dir, exist_ok=True)
     output_file = os.path.join(cfg.exp_dir, f"evaluation_results.txt")
     
-    if exp_type == 'sketch':
-        score = eval_cycle(cfg.data_root, evaluator, predictor, cfg)
+    if exp_type == 'sketch' or exp_type == 'realworld':
+        scores = eval_cycle(cfg.data_root, evaluator, predictor, cfg)
         
         with open(output_file, "w") as f:
-            for key, score in score.items():
-                f.write(f"{key}: {score}\n")
-    
-    elif exp_type == 'realworld':
-        curr_collate_fn = collate_fn
-        from mydataset import RealWorldDataset
-        test_dataset = RealWorldDataset(
-            data_root=cfg.data_root,
-            proportions=cfg.proportions,
-            resize_to=[256, 256]
-        ) 
-
-        # Creating the DataLoader object
-        test_dataloader = torch.utils.data.DataLoader(
-            test_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=1,
-            collate_fn=curr_collate_fn,
-        )
-
-        # Timing and conducting the evaluation
-        import time
-
-        start = time.time()
-        # log_file = os.path.join(cfg.exp_dir, f"result_eval_whole.json")
-        evaluate_result = evaluator.evaluate_sequence(
-            predictor, test_dataloader, dataset_name=cfg.mode
-        )
-        end = time.time()
-        print(end - start)
-
-        # Saving the evaluation results to a .json file
-        evaluate_result = evaluate_result["avg"]
-        print("evaluate_result", evaluate_result)
-        evaluate_result["time"] = end - start
-        
-        with open(output_file, "w") as f:
-            for key, score in evaluate_result.items():
+            for key, score in scores.items():
                 f.write(f"{key}: {score}\n")
         
     elif exp_type == 'perturbed':

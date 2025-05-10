@@ -522,7 +522,7 @@ def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
     output_file = os.path.join(args.output_dir, f"evaluation_results.txt")
 
-    if exp_type == 'sketch':
+    if exp_type == 'sketch' or exp_type == 'realworld':
         score = eval_cycle(device, model, evaluator, args.data_root)
         
         with open(output_file, "w") as f:

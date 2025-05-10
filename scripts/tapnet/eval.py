@@ -21,6 +21,7 @@ if torch.cuda.is_available():
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
+print(device)
   
 def preprocess_frames(frames):
     """Preprocess frames to model inputs.
@@ -75,25 +76,29 @@ def eval_cycle(video_path, model, args):
     from data_utils import get_sketch_data_path, get_depth_root_from_data_root, get_perturbed_data_path
     exp_type, set_type = args.mode.split('_')[0], '_'.join(args.mode.split('_')[1:])
     
-    if exp_type == 'sketch':
-        PATHS = get_sketch_data_path(args.data_root)
-    elif exp_type == 'perturbed':
-        PATHS = get_perturbed_data_path(args.data_root)
-        
-    dataset_type, dataset_root, queried_first = PATHS[set_type]
+    if exp_type == 'realworld':
+        from mydataset import create_real_dataset
+        test_dataset = create_real_dataset(args.data_root, tuple(args.proportions), resolution=tuple(args.image_size))
+    else:
+        if exp_type == 'sketch':
+            PATHS = get_sketch_data_path(args.data_root)
+        elif exp_type == 'perturbed':
+            PATHS = get_perturbed_data_path(args.data_root)
+            
+        dataset_type, dataset_root, queried_first = PATHS[set_type]
 
-    davis_dataset = create_depth_dataset(
-        data_root=dataset_root,
-        depth_root=get_depth_root_from_data_root(dataset_root) \
-            if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
-        proportions=tuple(args.proportions),
-        dataset_type=dataset_type,
-        resolution=tuple(args.image_size),
-        query_mode='first' if queried_first else 'strided',
-    )
+        test_dataset = create_depth_dataset(
+            data_root=dataset_root,
+            depth_root=get_depth_root_from_data_root(dataset_root) \
+                if exp_type == 'sketch' else os.path.join(video_path, "video_depth_anything"),
+            proportions=tuple(args.proportions),
+            dataset_type=dataset_type,
+            resolution=tuple(args.image_size),
+            query_mode='first' if queried_first else 'strided',
+        )
 
     summed_scalars = None
-    for sample_idx, sample in enumerate(davis_dataset):
+    for sample_idx, sample in enumerate(test_dataset):
         sample = sample['depth']
         frames = np.round((sample['video'][0] + 1) / 2 * 255).astype(np.uint8)
         query_points = sample['query_points'][0]
@@ -152,11 +157,11 @@ def main(args):
     os.makedirs(args.save_path, exist_ok=True)
     output_file = os.path.join(args.save_path, f"evaluation_results.txt")
     
-    if exp_type == 'sketch':
-        score = eval_cycle(args.data_root, model, args)
+    if exp_type == 'sketch' or exp_type == 'realworld':
+        scores = eval_cycle(args.data_root, model, args)
         
         with open(output_file, "w") as f:
-            for key, score in score.items():
+            for key, score in scores.items():
                 f.write(f"{key}: {score}\n")
         
     elif exp_type == 'perturbed':
