@@ -552,12 +552,12 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
         return data
     
     def __getitem__(self, index):
-        if self.dataset_type in ["davis", "stacking"]:
+        if self.dataset_type in ["davis", "stacking", "robotap"]:
             video_name = self.video_names[index]
         else:
             video_name = index
             
-        if self.dataset_type == "davis":
+        if self.dataset_type in ["davis", "robotap"]:
             video_index = video_name
         else:
             video_index = index
@@ -723,7 +723,7 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
     
     def __len__(self):
         if self.dataset_type == "kinetics":
-            return 1071
+            return 1081
         return len(self.points_dataset)
         
 def load_queries_strided_from_npz(
@@ -769,7 +769,7 @@ def load_queries_strided_from_npz(
     }
 
 class RealWorldDataset(torch.utils.data.Dataset):
-    def __init__(self, data_root, proportions, resize_to_256=True):
+    def __init__(self, data_root, proportions, resize_to_256=True, transforms=None, aux_target_hacks=None, num_queries_per_video=-1, align_corners=False):
         self.data_root = data_root
         depth_root = os.path.join(data_root, "video_depth_anything")
         self.resize_to_256 = resize_to_256
@@ -778,6 +778,10 @@ class RealWorldDataset(torch.utils.data.Dataset):
         self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
         self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
         self.proportions = proportions
+        self.transforms = transforms
+        self.aux_target_hacks = aux_target_hacks
+        self.num_queries_per_video = num_queries_per_video
+        self.align_corners = align_corners
     
     def __getitem__(self, index):
         path = self.video_paths[index]
@@ -787,16 +791,32 @@ class RealWorldDataset(torch.utils.data.Dataset):
             queries_xyt = data["queries_xyt"]
             tracks_xy = data["tracks_XY"]
             visibles = data["visibility"]
-            # intrinsics_params = data["fx_fy_cx_cy"]  # Optional
 
-        # Decode frames
+        # Decode JPEG frames
         frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in images_jpeg_bytes])
         video_name = os.path.splitext(os.path.basename(path))[0]
-        # frames = self.video_dataset[video_name]
         depth_frames = self.depth_dataset[video_name]
-        
-        # 如果frame尺寸和depth_frame尺寸不一样，resize到depth_frame尺寸
-        if frames.shape[1:3] != depth_frames.shape[1:3]:
+
+        # Decode depth frames if needed
+        if isinstance(depth_frames[0], bytes):
+            depth_frames = np.array([np.array(Image.open(io.BytesIO(b))) for b in depth_frames])
+
+        # Resize to 256x256 if configured
+        if self.resize_to_256:
+            H, W = frames.shape[1:3]
+            scale_w = 255 / (W - 1)
+            scale_h = 255 / (H - 1)
+            if self.align_corners:
+                frames = torch.nn.functional.interpolate(torch.FloatTensor(frames).permute(0, 3, 1, 2), [256, 256], mode="bilinear", align_corners=True).permute(0, 2, 3, 1).numpy()
+                depth_frames = torch.nn.functional.interpolate(torch.FloatTensor(depth_frames).permute(0, 3, 1, 2), [256, 256], mode="bilinear", align_corners=True).permute(0, 2, 3, 1).numpy()
+            else:
+                frames = resize_video(frames, [256, 256])
+                depth_frames = resize_video(depth_frames, [256, 256])
+            queries_xyt[:, 0] *= scale_w
+            queries_xyt[:, 1] *= scale_h
+            tracks_xy[..., 0] *= scale_w
+            tracks_xy[..., 1] *= scale_h
+        else:
             H, W = depth_frames.shape[1:3]
             scale_w = (W - 1) / (frames.shape[2] - 1)
             scale_h = (H - 1) / (frames.shape[1] - 1)
@@ -804,62 +824,67 @@ class RealWorldDataset(torch.utils.data.Dataset):
             queries_xyt[:, 1] *= scale_h
             tracks_xy[..., 0] *= scale_w
             tracks_xy[..., 1] *= scale_h
-            
             frames = resize_video(frames, (H, W))
-        
+
+        # Blend RGB and depth using the configured proportions
         a, b, c = self.proportions
         frames = np.stack([
-            a * depth_frames[:, :, :, 0] + (1 - a) * frames[:, :, :, 0],  # First channel blend
-            b * depth_frames[:, :, :, 0] + (1 - b) * frames[:, :, :, 1],  # Second channel blend
-            c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2]   # Third channel blend
-        ], axis=3)  # Stack along the channel dimension
-        
-        frames = frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
-        depth_frames = depth_frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
+            a * depth_frames[:, :, :, 0] + (1 - a) * frames[:, :, :, 0],
+            b * depth_frames[:, :, :, 0] + (1 - b) * frames[:, :, :, 1],
+            c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2],
+        ], axis=3)
 
-        # Load and normalize
+
+        # Load and normalize queries/tracks
         converted = load_queries_strided_from_npz(queries_xyt, tracks_xy, visibles, frames)
         assert converted["target_points"].shape[1] == converted["query_points"].shape[1]
-        
-        aligned_data_list = []
-        aligned_inv_data_list = []
 
         num_points, num_frames = converted["occluded"][0].shape
         tracking_mask = torch.ones([num_points, num_frames]) > 0
         tracking_mask_inv = torch.ones([num_points, num_frames]) > 0
         first_emerge_frames = converted["query_points"][0, :, 0]
+
         for p_id in range(num_points):
             tracking_mask[p_id, : int(first_emerge_frames[p_id])] = False
-            tracking_mask_inv[p_id, int(first_emerge_frames[p_id]+1):] = False
-        targets ={
+            tracking_mask_inv[p_id, int(first_emerge_frames[p_id] + 1):] = False
+
+        # Forward direction targets
+        targets = {
             "points": torch.from_numpy(converted["target_points"])[0].float(),
-            'occluded': torch.from_numpy(converted["occluded"][0]), 
-            'num_frames': num_frames, 
-            'sampled_frame_ids': torch.arange(num_frames), 
+            'occluded': torch.from_numpy(converted["occluded"][0]),
+            'num_frames': num_frames,
+            'sampled_frame_ids': torch.arange(num_frames),
             'tracking_mask': tracking_mask,
             'query_frames': torch.IntTensor(converted["query_points"][0, :, 0]),
             'sampled_point_ids': torch.arange(num_points),
             "num_real_pt": torch.tensor([num_points]),
-            'seq_name': str(video_name) + f"_stride",
+            'seq_name': str(video_name) + "_stride",
         }
-        frames = torch.FloatTensor(frames)
-        frames_inv = frames.flip(0)
-        depth_frames = torch.FloatTensor(frames)
-        depth_frames_inv = depth_frames.flip(0)
-        targets_inv ={
+
+        # Inverse direction targets
+        frames_inv = torch.FloatTensor(frames).flip(0)
+        depth_frames_inv = torch.FloatTensor(depth_frames).flip(0)
+        targets_inv = {
             "points": torch.from_numpy(converted["target_points"])[0].float().flip(1),
-            'occluded': torch.from_numpy(converted["occluded"][0]).flip(1), 
-            'num_frames': num_frames, 
-            'sampled_frame_ids': torch.arange(num_frames), 
+            'occluded': torch.from_numpy(converted["occluded"][0]).flip(1),
+            'num_frames': num_frames,
+            'sampled_frame_ids': torch.arange(num_frames),
             'tracking_mask': tracking_mask_inv.flip(1),
             'query_frames': num_frames - torch.IntTensor(converted["query_points"][0, :, 0]) - 1,
             'sampled_point_ids': torch.arange(num_points),
             "num_real_pt": torch.tensor([num_points]),
-            'seq_name': str(video_name) + f"_stride_inv",
+            'seq_name': str(video_name) + "_stride_inv",
         }
-        aligned_data_list.append(self.align_format(frames.permute(0, 3, 1, 2) / 255.0, torch.FloatTensor(depth_frames).permute(0, 3, 1, 2) / 255.0, targets))
-        aligned_inv_data_list.append(self.align_format(frames_inv.permute(0, 3, 1, 2) / 255.0, torch.FloatTensor(depth_frames_inv).permute(0, 3, 1, 2) / 255.0, targets_inv))
+
+        aligned_data_list = [self.align_format(torch.FloatTensor(frames).permute(0, 3, 1, 2) / 255.0,
+                                            torch.FloatTensor(depth_frames).permute(0, 3, 1, 2) / 255.0,
+                                            targets)]
+        aligned_inv_data_list = [self.align_format(frames_inv.permute(0, 3, 1, 2) / 255.0,
+                                                depth_frames_inv.permute(0, 3, 1, 2) / 255.0,
+                                                targets_inv)]
+
         return aligned_data_list, aligned_inv_data_list
+
 
     def align_format(self, images, depths, targets):
         if self.transforms is not None:
@@ -889,9 +914,7 @@ class RealWorldDataset(torch.utils.data.Dataset):
         return samples, targets, seq_name
     
     def __len__(self):
-        if self.dataset_type == "kinetics":
-            return 1071
-        return len(self.points_dataset)
+        return len(self.video_paths)
 
 def build_tapvid(video_path, mode, args):
     
@@ -903,10 +926,17 @@ def build_tapvid(video_path, mode, args):
     root = Path(args.data_root)
     
     if exp_type == 'realworld':
+        aux_target_hacks_list = get_aux_target_hacks_list("val", args)
+        transforms            = make_temporal_transforms("val", fix_size=args.fix_size, strong_aug=False, args=args)
+        align_corners = getattr(args, "resize_align_corners", False)
         dataset  = RealWorldDataset(
             video_path,
             proportions=args.proportions,
             resize_to_256=True,
+            transforms=transforms, 
+            aux_target_hacks=aux_target_hacks_list,
+            num_queries_per_video=args.num_queries_per_video_eval,
+            align_corners=align_corners,
         )
         
     else:

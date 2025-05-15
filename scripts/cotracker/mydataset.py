@@ -529,6 +529,7 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
             video_index = pkl_index
 
         frames = self.video_dataset[video_name]
+        # frames = self.points_dataset[video_index]['video']
         depth_frames = self.depth_dataset[video_name]
 
         if self.fast_eval and frames.shape[0] > 300:
@@ -595,7 +596,7 @@ class TapVidDepthDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         if self.dataset_type == "kinetics":
-            return 1071
+            return 1081
         return len(self.points_dataset)
     
 def load_queries_strided_from_npz(

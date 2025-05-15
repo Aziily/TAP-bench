@@ -471,16 +471,16 @@ def create_depth_dataset(
     to_iterate = range(len(points_dataset))
 
     for index in to_iterate:
-        if dataset_type in ["davis", "stacking"]:
+        if dataset_type in ["davis", "stacking", "robotap"]:
             video_name = video_names[index]
         else:
             video_name = index
             
-        if dataset_type == "davis":
+        if dataset_type in ["davis", "robotap"]:
             video_index = video_name
         else:
             video_index = index
-
+        # frames = points_dataset[video_index]['video']
         frames = video_dataset[video_name]
         depth_frames = depth_dataset[video_name]
 
@@ -546,7 +546,13 @@ def load_queries_strided_from_npz(
     """
     n_frames, H, W, _ = frames.shape
     n_queries = queries_xyt.shape[0]
-
+    
+    # if n_queries > 50:
+    #   queries_xyt = queries_xyt[:50]
+    #   tracks_xy = tracks_xy[:, :50]
+    #   visibles = visibles[:, :50]     
+    #   n_queries = 50
+      
     # Normalize coordinates to [-1, 1]
     query_points = np.stack([
         # (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
@@ -577,7 +583,7 @@ def create_real_dataset(
     depth_root = os.path.join(data_root, "video_depth_anything")
     video_paths = sorted(glob.glob(os.path.join(data_root, "*.npz")))
     print(f"Found {len(video_paths)} video files in {data_root}")
-    video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+    # video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
     depth_dataset = read_videos(depth_root, "*_vis.mp4")
         
     print("found %d unique videos in %s" % (len(video_paths), data_root))

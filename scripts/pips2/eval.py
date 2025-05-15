@@ -30,14 +30,14 @@ def parse_args():
     parser.add_argument("--image_size", type=int, default=[512,896], nargs='+')
     parser.add_argument("--shuffle", type=bool, default=False)
     parser.add_argument("--log_freq", type=int, default=99)
-    parser.add_argument("--max_iters", type=int, default=1000)
+    parser.add_argument("--max_iters", type=int, default=1081)
     parser.add_argument("--log_dir", type=str, default='./logs')
     parser.add_argument("--mode", type=str, default="depth_tapvid_davis_first")
     parser.add_argument("--data_root", type=str, default="./tap/sketch_tapvid_davis")
     parser.add_argument("--proportions", type=float, default=[0.0, 0.0, 0.0], nargs='+')
     parser.add_argument("--init_dir", type=str, default='./reference_model')
     parser.add_argument("--device_ids", type=list, default=[0])
-    parser.add_argument("--n_pool", type=int, default=1000)
+    parser.add_argument("--n_pool", type=int, default=1081)
     return parser.parse_args()
 
 def create_pools(n_pool=1000):

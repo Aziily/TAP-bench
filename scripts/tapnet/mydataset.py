@@ -471,18 +471,19 @@ def create_depth_dataset(
     to_iterate = range(len(points_dataset))
 
     for index in to_iterate:
-        if dataset_type in ["davis", "stacking"]:
+        if dataset_type in ["davis", "stacking", "robotap"]:
             video_name = video_names[index]
         else:
             video_name = index
             
-        if dataset_type == "davis":
+        if dataset_type in ["davis", "robotap"]:
             video_index = video_name
         else:
             video_index = index
 
         frames = video_dataset[video_name]
         depth_frames = depth_dataset[video_name]
+        # frames = points_dataset[video_index]['video']
 
         if isinstance(frames[0], bytes):
             # TAP-Vid is stored and JPEG bytes rather than `np.ndarray`s.

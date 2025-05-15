@@ -30,7 +30,7 @@ else
     DEVICE_ID=0
 fi
 
-IMAGE_SIZE="512 896"
+IMAGE_SIZE="384 512"
 
 CHECKPOINT="/mnt/nas/share/home/zzh/project/TAPs/pips2/reference_model"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

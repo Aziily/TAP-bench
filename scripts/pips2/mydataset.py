@@ -8,6 +8,8 @@ import glob
 import os
 import io
 from PIL import Image
+from typing import Mapping, Tuple, Union
+import mediapy as media
 
 from typing import Mapping
 
@@ -250,7 +252,13 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         with open(self.all_paths[self.curr_path_idx], "rb") as f:
             data = pickle.load(f)
         return data
-        
+    
+    def resize_video(self, video: np.ndarray, output_size: Tuple[int, int]) -> np.ndarray:
+        """Resize a video to output_size."""
+        # If you have a GPU, consider replacing this with a GPU-enabled resize op,
+        # such as a jitted jax.image.resize.  It will make things faster.
+        return media.resize_video(video, output_size)
+
     def __getitem__(self, index):
         if self.dataset_type in ["davis", "stacking", "robotap"]:
             video_name = self.video_names[index]
@@ -279,6 +287,7 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
             video_index = pkl_index
             
         frames = self.video_dataset[video_name]
+        # frames = self.points_dataset[video_index]['video']
         depth_frames = self.depth_dataset[video_name]
         
         if isinstance(frames[0], bytes):
@@ -300,6 +309,8 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
         
         # rgbs = self.points_dataset[video_index]['video'] # list of H,W,C uint8 images
         # depth = self.depth_dataset[video_name]
+        frames = self.resize_video(frames, self.image_size)
+        depth_frames = self.resize_video(depth_frames, self.image_size)
         rgbs = frames
         depth = depth_frames
 
@@ -358,7 +369,7 @@ class TapVidDepthDavis(torch.utils.data.Dataset):
 
     def __len__(self):
         if self.dataset_type == "kinetics":
-            return 1071
+            return 1081
         return len(self.points_dataset)
     
 def load_queries_strided_from_npz(
@@ -380,7 +391,12 @@ def load_queries_strided_from_npz(
     """
     n_frames, H, W, _ = frames.shape
     n_queries = queries_xyt.shape[0]
-
+    
+    # if n_queries > 50:
+    #     queries_xyt = queries_xyt[:50]
+    #     tracks_xy = tracks_xy[:, :50]
+    #     visibles = visibles[:, :50] 
+    #     n_queries = 50
     # Normalize coordinates to [-1, 1]
     query_points = np.stack([
         # (queries_xyt[:, 2] / (n_frames - 1)) * 2 - 1,  # t in [-1, 1]
@@ -403,26 +419,11 @@ def load_queries_strided_from_npz(
         "trackgroup": np.arange(n_queries)[np.newaxis, ...],
     }
 
-def resize_video(video: np.ndarray, output_size: tuple) -> np.ndarray:
-    """Resizes a video to the given output size.
-    
-    Args:
-        video: [T, H, W, C] float32 array.
-        output_size: (height, width) tuple.
-    
-    Returns:
-        A video with the given output size, same dtype as input.
-    """
-    T, H, W, C = video.shape
-    target_h, target_w = output_size
-    resized_video = np.zeros((T, target_h, target_w, C), dtype=video.dtype)
-
-    for t in range(T):
-        frame = video[t]
-        resized_frame = cv2.resize(frame, (target_w, target_h))  # 注意顺序是 (width, height)
-        resized_video[t] = resized_frame
-
-    return resized_video
+def resize_video(video: np.ndarray, output_size: Tuple[int, int]) -> np.ndarray:
+    """Resize a video to output_size."""
+    # If you have a GPU, consider replacing this with a GPU-enabled resize op,
+    # such as a jitted jax.image.resize.  It will make things faster.
+    return media.resize_video(video, output_size)
 
 class RealWorldDataset(torch.utils.data.Dataset):
     def __init__(self, data_root, proportions, resize_to=(256, 256)):
@@ -431,7 +432,7 @@ class RealWorldDataset(torch.utils.data.Dataset):
         self.resize_to = resize_to
         self.video_paths = sorted(glob.glob(os.path.join(data_root, "*.npz")))
         print(f"Found {len(self.video_paths)} video files in {data_root}")
-        self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
+        # self.video_dataset = read_videos(depth_root, "*_src.mp4", rgb=True)
         self.depth_dataset = read_videos(depth_root, "*_vis.mp4")
         self.proportions = proportions
         
@@ -454,17 +455,17 @@ class RealWorldDataset(torch.utils.data.Dataset):
         # frames = self.video_dataset[video_name]
         depth_frames = self.depth_dataset[video_name]
         
-        # 如果frame尺寸和depth_frame尺寸不一样，resize到depth_frame尺寸
-        if frames.shape[1:3] != depth_frames.shape[1:3]:
-            H, W = depth_frames.shape[1:3]
+        if self.resize_to is not None:
+            H, W = self.resize_to
+            # Rescale the tracks and queries
             scale_w = (W - 1) / (frames.shape[2] - 1)
             scale_h = (H - 1) / (frames.shape[1] - 1)
             queries_xyt[:, 0] *= scale_w
             queries_xyt[:, 1] *= scale_h
             tracks_xy[..., 0] *= scale_w
             tracks_xy[..., 1] *= scale_h
-            
-            frames = resize_video(frames, (H, W))
+            frames = resize_video(frames, self.resize_to)
+            depth_frames = resize_video(depth_frames, self.resize_to)
         
         a, b, c = self.proportions
         frames = np.stack([
@@ -473,25 +474,37 @@ class RealWorldDataset(torch.utils.data.Dataset):
             c * depth_frames[:, :, :, 0] + (1 - c) * frames[:, :, :, 2]   # Third channel blend
         ], axis=3)  # Stack along the channel dimension
         
-        frames = frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
-        depth_frames = depth_frames.astype(np.float32) / 127.5 - 1.0  # Scale to [-1, 1]
 
         # Load and normalize
         converted = load_queries_strided_from_npz(queries_xyt, tracks_xy, visibles, frames)
         assert converted["target_points"].shape[1] == converted["query_points"].shape[1]
+        
+        # Extract converted data
+        trajs = converted["target_points"][0]      # [N, T, 2]
+        valids = 1 - converted["occluded"][0]      # [N, T], 1 = visible
+        query_points = converted["query_points"][0]  # [N, 3]
+        rgbs = frames  # [T, H, W, 3]
+        T, H, W, _ = rgbs.shape
+
+        # Transpose for [T, N, 2] and [T, N]
+        trajs = trajs.transpose(1, 0, 2)  # [T, N, 2]
+        valids = valids.transpose(1, 0)  # [T, N]
+
+        # Only keep trajectories that are visible at first frame
+        # vis_ok = valids[0] > 0
+        # trajs = trajs[:, vis_ok]
+        # valids = valids[:, vis_ok]
 
         rgbs = torch.from_numpy(frames).permute(0, 3, 1, 2).float()
-        trajs = (
-            torch.from_numpy(converted["target_points"])[0].permute(1, 0, 2).float()
-        )  # T, N, 2
-        visibles = torch.logical_not(torch.from_numpy(converted["occluded"])[0]).permute(1, 0)  # T, N
+        trajs_tensor = torch.from_numpy(trajs).float()                       # [T, N, 2]
+        valids_tensor = torch.from_numpy(valids).bool()                      # [T, N]
         query_points = torch.from_numpy(converted["query_points"])[0]
 
         sample = {
             'rgbs': rgbs,
-            'trajs': trajs,
-            'valids': visibles,
-            'visibs': visibles,
+            'trajs': trajs_tensor,
+            'valids': valids_tensor,
+            'visibs': valids_tensor,
             'query_points': query_points,
         }
 
